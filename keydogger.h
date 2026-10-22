@@ -24,7 +24,6 @@
 #define ECREATE 8
 #define EWRITE 9
 #define EENV 10
-#define ENOPRIV 11
 #define EFORK 12
 #define ELEAD 13
 #define ECHDIR 14
@@ -33,12 +32,10 @@
 #define EUSAGE 19
 #define ESTR 20
 #define EUSER 21
-#define EUID 24
 #define ECLEAN 26
 
 #define RC_PATH "keydoggerrc"
 #define UINPUT_PATH "/dev/uinput"
-#define PID_PATH "/run/keydogger.pid"
 
 static const size_t key_codes[] = {
     KEY_1,
@@ -116,7 +113,6 @@ struct key
 void cleanup_trie(struct trie *trie);
 void cleanup();
 void read_from_rc(char *path);
-bool check_privileges();
 bool is_supported_key_code(size_t code);
 char get_char_from_keycode(size_t keycode, bool is_shifted);
 // very unusual error, mismatch between def and impl

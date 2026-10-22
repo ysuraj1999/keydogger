@@ -9,7 +9,9 @@
 #include <string.h>
 #include <signal.h>
 #include <errno.h>
+#include <limits.h>
 #include <poll.h>
+#include <pwd.h>
 #include <sys/file.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
@@ -19,15 +21,13 @@
 #define STARTUP_TIMEOUT_MS 5000
 #define SHUTDOWN_TIMEOUT_MS 5000
 
-extern char **environ;
-
 #if DEBUG_MODE == 1
 static char *KEYBOARD_DEVICE = KEYDOGGER_KEYBOARD;
 #else
 static char *KEYBOARD_DEVICE = NULL;
 #endif
 
-static char *DAEMON = DAEMON_NAME;
+static char *DAEMON = "keydoggerd";
 static struct trie *TRIE = NULL;
 
 char *DEBUG_RC_PATH = "./keydoggerrc";
@@ -36,6 +36,7 @@ static int fkeyboard_device = -1;
 static int vkeyboard_device = -1;
 static int ready_fd = -1;
 static int pidfile_fd = -1;
+static char pidfile_path[PATH_MAX];
 static volatile sig_atomic_t cancel_wait = 0;
 
 // Direct mapping of char codes to linux key codes
@@ -271,26 +272,6 @@ void init_key_to_position_map()
     key_codes_to_position[KEY_GRAVE | FLAG_UPPERCASE] = 125;
 }
 
-void set_env_vars()
-{
-    if (getenv("WAYLAND_DISPLAY") == NULL)
-    {
-        setenv("WAYLAND_DISPLAY", "wayland-0", 0);
-    }
-    if (getenv("XDG_RUNTIME_DIR") == NULL)
-    {
-        char *uid = getenv("SUDO_UID");
-        if (uid == NULL)
-        {
-            printf("Error getting current users uid");
-            exit(EUID);
-        }
-        char xdg_runtime_path[100];
-        snprintf(xdg_runtime_path, 100, "/run/user/%s", uid);
-        setenv("XDG_RUNTIME_DIR", xdg_runtime_path, 0);
-    }
-}
-
 void cleanup_trie(struct trie *trie)
 {
     if (trie == NULL)
@@ -339,9 +320,49 @@ static bool is_daemon_pid(pid_t pid)
     return strcmp(comm, DAEMON) == 0;
 }
 
+static void init_runtime_path()
+{
+    const char *runtime_dir = getenv("XDG_RUNTIME_DIR");
+    if (runtime_dir == NULL || runtime_dir[0] == '\0')
+    {
+        fprintf(stderr, "XDG_RUNTIME_DIR is not set\n");
+        exit(EXIT_FAILURE);
+    }
+    if (runtime_dir[0] != '/')
+    {
+        fprintf(stderr, "XDG_RUNTIME_DIR must be an absolute path\n");
+        exit(EXIT_FAILURE);
+    }
+
+    struct stat runtime_stat;
+    if (stat(runtime_dir, &runtime_stat) < 0)
+    {
+        perror("XDG_RUNTIME_DIR");
+        exit(EXIT_FAILURE);
+    }
+    if (!S_ISDIR(runtime_stat.st_mode))
+    {
+        fprintf(stderr, "XDG_RUNTIME_DIR is not a directory\n");
+        exit(EXIT_FAILURE);
+    }
+    if (access(runtime_dir, R_OK | W_OK | X_OK) < 0)
+    {
+        perror("XDG_RUNTIME_DIR");
+        exit(EXIT_FAILURE);
+    }
+
+    int length = snprintf(pidfile_path, sizeof(pidfile_path),
+                          "%s/keydogger.pid", runtime_dir);
+    if (length < 0 || (size_t)length >= sizeof(pidfile_path))
+    {
+        fprintf(stderr, "XDG_RUNTIME_DIR is too long\n");
+        exit(EXIT_FAILURE);
+    }
+}
+
 static pid_t read_pidfile()
 {
-    int fd = open(PID_PATH, O_RDONLY | O_CLOEXEC);
+    int fd = open(pidfile_path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
     {
         return -1;
@@ -367,7 +388,7 @@ static pid_t read_pidfile()
 // Returns 0 on success, 1 if already running, -1 on error
 static int acquire_pidfile(pid_t *running_pid)
 {
-    int fd = open(PID_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    int fd = open(pidfile_path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
     if (fd < 0)
     {
         return -1;
@@ -497,16 +518,41 @@ static bool is_printable_ascii(char *string)
 
 void read_from_rc(char *path)
 {
-    char *user = getlogin();
-    if (user == NULL)
+    char rc_file_path[256];
+    const char *home = NULL;
+    struct passwd *password = NULL;
+
+    const char *sudo_user = getenv("SUDO_USER");
+    if (sudo_user != NULL && sudo_user[0] != '\0')
     {
-        printf("Error getting current user");
+        password = getpwnam(sudo_user);
+        if (password != NULL)
+        {
+            home = password->pw_dir;
+        }
+    }
+    if (home == NULL || home[0] == '\0')
+    {
+        home = getenv("HOME");
+    }
+    if (home == NULL || home[0] == '\0')
+    {
+        password = getpwuid(getuid());
+        if (password != NULL)
+        {
+            home = password->pw_dir;
+        }
+    }
+    if (home == NULL || home[0] == '\0')
+    {
+        fprintf(stderr, "Error determining home directory\n");
         exit(EUSER);
     }
-    char rc_file_path[256];
-    if (snprintf(rc_file_path, 256, "/home/%s/%s", user, RC_PATH) < 0)
+
+    int path_length = snprintf(rc_file_path, sizeof(rc_file_path), "%s/%s", home, RC_PATH);
+    if (path_length < 0 || (size_t)path_length >= sizeof(rc_file_path))
     {
-        printf("Error constructing config path %s\n", RC_PATH);
+        fprintf(stderr, "Error constructing config path %s\n", RC_PATH);
         exit(ESTR);
     }
 
@@ -514,12 +560,17 @@ void read_from_rc(char *path)
     init_trie(TRIE, NULL);
     if (path != NULL)
     {
-        strcpy(rc_file_path, path);
+        path_length = snprintf(rc_file_path, sizeof(rc_file_path), "%s", path);
+        if (path_length < 0 || (size_t)path_length >= sizeof(rc_file_path))
+        {
+            fprintf(stderr, "Config path too long\n");
+            exit(ESTR);
+        }
     }
     FILE *rc_file = fopen(rc_file_path, "r");
     if (rc_file == NULL)
     {
-        printf("Error opening %s\n", rc_file_path);
+        fprintf(stderr, "Error opening %s\n", rc_file_path);
         exit(EOPEN);
     }
 
@@ -552,7 +603,7 @@ void read_from_rc(char *path)
 
         if (!is_printable_ascii(key) || !is_printable_ascii(value))
         {
-            printf("Warning: skipping non-ASCII expansion for trigger %s\n", key);
+            fprintf(stderr, "Warning: skipping non-ASCII expansion for trigger %s\n", key);
             continue;
         }
         push_trie(key, value);
@@ -604,7 +655,7 @@ void send_key_to_device(int keyboard_device, struct input_event event)
     int write_status = write(keyboard_device, &event, sizeof(event));
     if (write_status < 0)
     {
-        printf("Error writing to virtual device\n");
+        fprintf(stderr, "Error writing to virtual device\n");
         exit(EWRITE);
     }
 }
@@ -724,25 +775,25 @@ void init_virtual_device(int vkeyboard_device)
     // setup as keyboard
     if ((status = ioctl(vkeyboard_device, UI_SET_EVBIT, EV_KEY)) < 0)
     {
-        printf("Error initializing virtual input\n");
+        fprintf(stderr, "Error initializing virtual input\n");
         exit(EINIT);
     }
     // setup keys to emit
     if ((status = ioctl(vkeyboard_device, UI_SET_KEYBIT, KEY_BACKSPACE)) < 0)
     {
-        printf("Error adding key to virtual input : %d\n", KEY_BACKSPACE);
+        fprintf(stderr, "Error adding key to virtual input : %d\n", KEY_BACKSPACE);
         exit(EADD);
     }
     if ((status = ioctl(vkeyboard_device, UI_SET_KEYBIT, KEY_LEFTCTRL)) < 0)
     {
-        printf("Error adding key to virtual input : %d\n", KEY_LEFTCTRL);
+        fprintf(stderr, "Error adding key to virtual input : %d\n", KEY_LEFTCTRL);
         exit(EADD);
     }
     for (size_t i = 0; i < LINUX_KEYS; i++)
     {
         if ((status = ioctl(vkeyboard_device, UI_SET_KEYBIT, key_codes[i])) < 0)
         {
-            printf("Error adding key to virtual input : %ld\n", key_codes[i]);
+            fprintf(stderr, "Error adding key to virtual input : %ld\n", key_codes[i]);
             exit(EADD);
         }
     }
@@ -755,12 +806,12 @@ void init_virtual_device(int vkeyboard_device)
 
     if ((status = ioctl(vkeyboard_device, UI_DEV_SETUP, &usetup)) < 0)
     {
-        printf("Error setting up virtual device\n");
+        fprintf(stderr, "Error setting up virtual device\n");
         exit(ESETUP);
     }
     if ((status = ioctl(vkeyboard_device, UI_DEV_CREATE)) < 0)
     {
-        printf("Error creating up virtual device\n");
+        fprintf(stderr, "Error creating up virtual device\n");
         exit(ECREATE);
     };
 }
@@ -782,13 +833,13 @@ void keydogger_daemon()
 
     if (sigaction(SIGINT, &sa, NULL) == -1)
     {
-        printf("Error cleaning up for SIGINT\n");
+        fprintf(stderr, "Error cleaning up for SIGINT\n");
         exit(ECLEAN);
     }
 
     if (sigaction(SIGTERM, &sa, NULL) == -1)
     {
-        printf("Error cleaning up for SIGTERM\n");
+        fprintf(stderr, "Error cleaning up for SIGTERM\n");
         exit(ECLEAN);
     }
 
@@ -797,13 +848,13 @@ void keydogger_daemon()
 
     if (fkeyboard_device < 0)
     {
-        printf("Error opening %s\n", KEYBOARD_DEVICE);
+        fprintf(stderr, "Error opening %s\n", KEYBOARD_DEVICE);
         exit(EOPEN);
     }
     vkeyboard_device = open(UINPUT_PATH, O_WRONLY);
     if (vkeyboard_device < 0)
     {
-        printf("Error opening %s\n", UINPUT_PATH);
+        fprintf(stderr, "Error opening %s\n", UINPUT_PATH);
         exit(EOPEN);
     }
 
@@ -839,7 +890,7 @@ void keydogger_daemon()
         int read_inputs = read(fkeyboard_device, &event, sizeof(struct input_event));
         if (read_inputs < 0)
         {
-            printf("Error reading from %s\n", KEYBOARD_DEVICE);
+            fprintf(stderr, "Error reading from %s\n", KEYBOARD_DEVICE);
             exit(EREAD);
         }
         // ignore events other than key
@@ -943,7 +994,6 @@ void keydogger_daemon()
 
 void daemonize_keydogger()
 {
-    int fd;
     int ready_pipe[2];
     pid_t pid;
     pid_t sid;
@@ -959,7 +1009,7 @@ void daemonize_keydogger()
 
     if ((pid = fork()) < 0)
     {
-        printf("Error forking 1\n");
+        fprintf(stderr, "Error forking 1\n");
         exit(EFORK);
     }
 
@@ -980,7 +1030,7 @@ void daemonize_keydogger()
 
         if (poll_status == 0)
         {
-            printf("Timed out waiting for keydoggerd to start\n");
+            fprintf(stderr, "Timed out waiting for keydoggerd to start\n");
             exit(EXIT_FAILURE);
         }
         if (poll_status < 0)
@@ -998,7 +1048,7 @@ void daemonize_keydogger()
 
         if (message_length <= 0)
         {
-            printf("keydoggerd failed to start; check /var/log/keydogger.log\n");
+            fprintf(stderr, "keydoggerd failed to start\n");
             exit(EXIT_FAILURE);
         }
 
@@ -1012,13 +1062,13 @@ void daemonize_keydogger()
 
     if ((sid = setsid()) < 0)
     {
-        printf("Error upgrading to session leader\n");
+        fprintf(stderr, "Error upgrading to session leader\n");
         exit(ELEAD);
     }
 
     if ((pid = fork()) < 0)
     {
-        printf("Error forking 2\n");
+        fprintf(stderr, "Error forking 2\n");
         exit(EFORK);
     }
     // exit Child1
@@ -1032,19 +1082,9 @@ void daemonize_keydogger()
 
     if (prctl(PR_SET_NAME, DAEMON) < 0)
     {
-        printf("Error setting name for process\n");
+        fprintf(stderr, "Error setting name for process\n");
         exit(ERENAM);
     }
-
-    fd = open("/var/log/keydogger.log", O_RDWR | O_CREAT | O_APPEND, 0644);
-    if (fd < 0)
-    {
-        printf("Error opening %s\n", "/var/log/keydogger.log");
-        exit(EOPEN);
-    }
-    dup2(fd, STDIN_FILENO);
-    dup2(fd, STDOUT_FILENO);
-    dup2(fd, STDERR_FILENO);
 
     // Close inherited descriptors, keeping the readiness pipe
     long max_fd = sysconf(_SC_OPEN_MAX);
@@ -1065,38 +1105,13 @@ void daemonize_keydogger()
     sigemptyset(&sigset);
     sigprocmask(SIG_SETMASK, &sigset, NULL);
 
-    umask(0);
-
     if (chdir("/") < 0)
     {
-        printf("Error changing directory to /");
+        fprintf(stderr, "Error changing directory to /\n");
         exit(ECHDIR);
     }
 
     keydogger_daemon();
-}
-
-bool check_privileges()
-{
-    if (environ == NULL)
-    {
-        printf("Error accessing ENV variables\n");
-        exit(EENV);
-    }
-    int i = 0;
-    while (environ[i] != NULL)
-    {
-        if (strncmp("USER=root", environ[i], 9) == 0)
-        {
-            return true;
-        }
-        if (strncmp("SUDO_COMMAND", environ[i], 12) == 0)
-        {
-            return true;
-        }
-        i++;
-    }
-    return false;
 }
 
 void print_trie(struct trie *trie, size_t level)
@@ -1130,7 +1145,7 @@ void read_keyboard_env()
     KEYBOARD_DEVICE = getenv("KEYDOGGER_KEYBOARD");
     if (KEYBOARD_DEVICE == NULL)
     {
-        printf("Required environment variable missing - KEYDOGGER_KEYBOARD\n");
+        fprintf(stderr, "Required environment variable missing - KEYDOGGER_KEYBOARD\n");
         exit(EENV);
     }
 #endif
@@ -1138,21 +1153,16 @@ void read_keyboard_env()
 
 int main(int argc, char *argv[])
 {
-    set_env_vars();
     if (argc < 2)
     {
-        printf("Usage error: keydogger start | stop | status | debug | viz\n");
+        fprintf(stderr, "Usage error: keydogger start | stop | status | debug | viz\n");
         exit(EUSAGE);
-    }
-
-    if (!check_privileges())
-    {
-        printf("Need sudo privileges\n");
-        exit(ENOPRIV);
     }
 
     if (strcmp(argv[1], "start") == 0)
     {
+        init_runtime_path();
+
         pid_t running_pid = 0;
         int pidfile_status = acquire_pidfile(&running_pid);
         if (pidfile_status == 1)
@@ -1178,6 +1188,8 @@ int main(int argc, char *argv[])
     }
     else if (strcmp(argv[1], "status") == 0)
     {
+        init_runtime_path();
+
         pid_t pid = read_pidfile();
         if (pid > 0)
         {
@@ -1191,6 +1203,8 @@ int main(int argc, char *argv[])
     }
     else if (strcmp(argv[1], "stop") == 0)
     {
+        init_runtime_path();
+
         pid_t pid = read_pidfile();
         if (pid <= 0)
         {
@@ -1227,11 +1241,13 @@ int main(int argc, char *argv[])
             exit(EXIT_SUCCESS);
         }
 
-        printf("keydoggerd still running after %d seconds\n", SHUTDOWN_TIMEOUT_MS / 1000);
+        fprintf(stderr, "keydoggerd still running after %d seconds\n", SHUTDOWN_TIMEOUT_MS / 1000);
         exit(EXIT_FAILURE);
     }
     else if (strcmp(argv[1], "restart") == 0)
     {
+        init_runtime_path();
+
         pid_t pid = read_pidfile();
         if (pid > 0)
         {
@@ -1245,7 +1261,7 @@ int main(int argc, char *argv[])
 
         if (acquire_pidfile_wait(SHUTDOWN_TIMEOUT_MS) < 0)
         {
-            printf("Timed out waiting for keydoggerd to stop\n");
+            fprintf(stderr, "Timed out waiting for keydoggerd to stop\n");
             exit(EXIT_FAILURE);
         }
 
@@ -1255,6 +1271,8 @@ int main(int argc, char *argv[])
     }
     else if (strcmp(argv[1], "debug") == 0)
     {
+        init_runtime_path();
+
         pid_t pid = read_pidfile();
         if (pid > 0)
         {
@@ -1266,7 +1284,7 @@ int main(int argc, char *argv[])
             printf("Sent SIGTERM to keydoggerd (pid %d)\n", pid);
             if (acquire_pidfile_wait(SHUTDOWN_TIMEOUT_MS) < 0)
             {
-                printf("Timed out waiting for keydoggerd to stop\n");
+                fprintf(stderr, "Timed out waiting for keydoggerd to stop\n");
                 exit(EXIT_FAILURE);
             }
         }
@@ -1298,7 +1316,7 @@ int main(int argc, char *argv[])
     }
     else
     {
-        printf("Usage error: keydogger start | stop | status | debug | viz\n");
+        fprintf(stderr, "Usage error: keydogger start | stop | status | debug | viz\n");
         exit(EUSAGE);
     }
 }
