@@ -1,25 +1,16 @@
 # For development only
-KEYDOGGER_KEYBOARD=/dev/input/event2
+KEYDOGGER_KEYBOARD=/dev/input/event0
 
-DEPENDENCIES=wl-copy wl-paste
 DAEMON_NAME=keydoggerd
 PREFIX=/usr/local/bin/
 CALLGRIND_FILE=benchmark.out
 
 .PHONY: build
-build: keydogger.h keydogger.c dependency-check
+build: keydogger.h keydogger.c
 	gcc -DDEBUG_MODE=0 -DDAEMON_NAME=\"$(DAEMON_NAME)\" -w keydogger.c -o keydogger
 
-.PHONY: dependency-check
-dependency-check:
-	@if which $(DEPENDENCIES) >/dev/null 2>&1; then \
-		echo "Dependency found: wl-clipboard"; \
-	else \
-		echo "ERROR: Dependency missing: wl-clipboard"; \
-	fi
-
 .PHONY: dev
-dev: keydogger.h keydogger.c dependency-check
+dev: keydogger.h keydogger.c
 	gcc -DDEBUG_MODE=1 -DKEYDOGGER_KEYBOARD=\"$(KEYDOGGER_KEYBOARD)\" -DDAEMON_NAME=\"$(DAEMON_NAME)\" -g -O0 keydogger.c -o keydogger -Wall  -Wextra -Wpedantic -Wsign-conversion -Wimplicit-function-declaration -Warray-bounds
 
 .PHONY: install

@@ -329,6 +329,17 @@ void wide_to_utf8(wchar_t *input, char *output)
     iconv_close(cd);
 }
 
+static bool is_printable_ascii(char *string)
+{
+    for (size_t i = 0; string[i] != '\0'; i++)
+    {
+        unsigned char character = (unsigned char)string[i];
+        if (character < 32 || character > 126)
+            return false;
+    }
+    return true;
+}
+
 void read_from_rc(char *path)
 {
     char *user = getlogin();
@@ -387,6 +398,13 @@ void read_from_rc(char *path)
                 char *utf_value = malloc(utf8_value_len);
                 wide_to_utf8(key, utf_key);
                 wide_to_utf8(value, utf_value);
+                if (!is_printable_ascii(utf_key) || !is_printable_ascii(utf_value))
+                {
+                    printf("Warning: skipping non-ASCII expansion for trigger %s\n", utf_key);
+                    free(utf_key);
+                    free(utf_value);
+                    continue;
+                }
                 push_trie(utf_key, utf_value);
                 free(utf_key);
                 free(utf_value);
@@ -487,66 +505,26 @@ void send_shift_up(int device_fd)
     usleep(SLEEP_TIME);
 }
 
-void send_to_keyboard(int device_fd, char *string)
+void send_to_keyboard(char *string)
 {
-    bool is_expansion_ascii = true;
+    struct input_event event = {0};
+    event.type = EV_KEY;
     for (size_t i = 0; i < strlen(string); i++)
     {
-        if (!isascii(string[i]))
-            is_expansion_ascii = false;
+        struct key key = get_key_from_char(string[i]);
+        event.code = key.keycode;
+        event.value = 1;
+        if (key.is_shifted)
+            send_shift_down(vkeyboard_device);
+        send_key_to_device(vkeyboard_device, event);
+        usleep(SLEEP_TIME);
+        event.value = 0;
+        send_key_to_device(vkeyboard_device, event);
+        usleep(SLEEP_TIME);
+        if (key.is_shifted)
+            send_shift_up(vkeyboard_device);
     }
-    if (is_expansion_ascii)
-    {
-        struct input_event event = {0};
-        event.type = EV_KEY;
-        for (size_t i = 0; i < strlen(string); i++)
-        {
-            struct key key = get_key_from_char(string[i]);
-            event.code = key.keycode;
-            event.value = 1;
-            if (key.is_shifted)
-                send_shift_down(vkeyboard_device);
-            send_key_to_device(vkeyboard_device, event);
-            usleep(SLEEP_TIME);
-            event.value = 0;
-            send_key_to_device(vkeyboard_device, event);
-            usleep(SLEEP_TIME);
-            if (key.is_shifted)
-                send_shift_up(vkeyboard_device);
-        }
-        send_sync(vkeyboard_device);
-        return;
-    }
-
-    char command[256];
-    snprintf(command, 256, "wl-copy %s", string);
-    int status = system(command);
-    if (status < 0)
-    {
-        perror("system");
-        exit(ECOPY);
-    }
-    struct input_event control_event = {
-        .type = EV_KEY,
-        .code = KEY_LEFTCTRL,
-        .value = 1};
-    struct input_event v_event = {
-        .type = EV_KEY,
-        .code = KEY_V,
-        .value = 1};
-    send_key_to_device(device_fd, control_event);
-    usleep(SLEEP_TIME);
-    send_sync(device_fd);
-    send_key_to_device(device_fd, v_event);
-    usleep(SLEEP_TIME);
-    send_sync(device_fd);
-    control_event.value = 0;
-    send_key_to_device(device_fd, control_event);
-    usleep(SLEEP_TIME);
-    send_sync(device_fd);
-    v_event.value = 0;
-    send_key_to_device(device_fd, v_event);
-    send_sync(device_fd);
+    send_sync(vkeyboard_device);
 }
 
 void init_trie(struct trie *trie, struct key *key)
@@ -781,7 +759,7 @@ void keydogger_daemon()
 
             // EXPAND
             send_backspace(vkeyboard_device, next->size);
-            send_to_keyboard(vkeyboard_device, next->expansion);
+            send_to_keyboard(next->expansion);
 
             // Reset trie head
             current_trie = TRIE;

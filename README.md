@@ -9,7 +9,6 @@
 > This is a privileged application. Hence it NEEDS sudo privileges. I have tried to keep the codebase small to reduce the footprint
 
 ## Prerequisites
-- `wl-clipboard`
 - `gcc`
 - `make`
 
@@ -41,6 +40,8 @@ sudo ./keydogger debug
 
 ### Configuring expansions
 Set trigger and expansion values in `~/keydoggerrc`. Expansion definitions follow the format `trigger=expansion`.
+
+Triggers and expansions must be printable ASCII. Entries containing any other characters are skipped with a warning.
 
 Here are some sample expansions you might like
 ```
@@ -77,7 +78,7 @@ sudo -E keydogger restart
 - [x] Use `/dev/uinput` to emit events
 - [x] Read trigger & expansions from `.keydoggerrc`
 ### v2
-- [x] Unicode support
+- [x] Unicode support (removed in favor of ASCII-only)
 ### v2.1
 - [x] feat: Keyboard path as environment Variable `KEYDOGGER_KEYBOARD`
 ### v2.2
@@ -85,7 +86,7 @@ sudo -E keydogger restart
 
 ### v3
 - [ ] Throttle writes with Async IO
-- [ ] Ability to do ascii only
+- [x] Ability to do ascii only
 - [ ] Keychords for actions ie enable/disable, reload
 
 ## Acknowledgements
