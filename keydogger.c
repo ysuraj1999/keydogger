@@ -36,6 +36,7 @@ static int fkeyboard_device = -1;
 static int vkeyboard_device = -1;
 static int ready_fd = -1;
 static int pidfile_fd = -1;
+static volatile sig_atomic_t cancel_wait = 0;
 
 // Direct mapping of char codes to linux key codes
 static int char_codes_to_key_codes[] = {
@@ -438,6 +439,28 @@ static void pidfile_release()
     }
     close(pidfile_fd);
     pidfile_fd = -1;
+}
+
+static void cancel_wait_handler(int sig __attribute__((unused)))
+{
+    cancel_wait = 1;
+}
+
+static bool wait_for_pid_exit(pid_t pid, int timeout_ms)
+{
+    for (int waited = 0; waited < timeout_ms; waited += 50)
+    {
+        if (kill(pid, 0) < 0 && errno == ESRCH)
+        {
+            return true;
+        }
+        if (cancel_wait)
+        {
+            return false;
+        }
+        usleep(50 * 1000);
+    }
+    return kill(pid, 0) < 0 && errno == ESRCH;
 }
 
 void cleanup()
@@ -1176,19 +1199,36 @@ int main(int argc, char *argv[])
         }
         if (kill(pid, SIGTERM) < 0)
         {
+            if (errno == ESRCH)
+            {
+                printf("keydoggerd already exited (pid %d)\n", pid);
+                exit(EXIT_SUCCESS);
+            }
             perror("Error sending SIGTERM");
             exit(EXIT_FAILURE);
         }
         printf("Sent SIGTERM to keydoggerd (pid %d)\n", pid);
-        if (kill(pid, 0) < 0 && errno == ESRCH)
+
+        struct sigaction cancel_action;
+        memset(&cancel_action, 0, sizeof(cancel_action));
+        cancel_action.sa_handler = cancel_wait_handler;
+        sigemptyset(&cancel_action.sa_mask);
+        sigaction(SIGINT, &cancel_action, NULL);
+
+        if (wait_for_pid_exit(pid, SHUTDOWN_TIMEOUT_MS))
         {
-            printf("keydoggerd has exited\n");
+            printf("keydoggerd stopped (pid %d)\n", pid);
+            exit(EXIT_SUCCESS);
         }
-        else
+
+        if (cancel_wait)
         {
-            printf("keydoggerd is still running\n");
+            printf("Stopped waiting; keydoggerd (pid %d) will exit in the background\n", pid);
+            exit(EXIT_SUCCESS);
         }
-        exit(EXIT_SUCCESS);
+
+        printf("keydoggerd still running after %d seconds\n", SHUTDOWN_TIMEOUT_MS / 1000);
+        exit(EXIT_FAILURE);
     }
     else if (strcmp(argv[1], "restart") == 0)
     {
