@@ -35,10 +35,8 @@
 #define EUSAGE 19
 #define ESTR 20
 #define EUSER 21
-#define ECVRT 22
 #define EUID 24
 #define ECLEAN 26
-#define EOVER 27
 
 #define RC_PATH "keydoggerrc"
 #define UINPUT_PATH "/dev/uinput"

@@ -10,12 +10,7 @@
 #include <signal.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
-#include <wchar.h>
-#include <locale.h>
-#include <iconv.h>
-#include <ctype.h>
 
-#define UTF8_SEQUENCE_MAXLEN 6
 #include "keydogger.h"
 
 extern char **environ;
@@ -313,22 +308,6 @@ void cleanup()
     cleanup_trie(TRIE);
 }
 
-void wide_to_utf8(wchar_t *input, char *output)
-{
-    iconv_t cd = iconv_open("UTF-8", "WCHAR_T");
-    size_t wcs_len = (wcslen(input) + 1) * sizeof(wchar_t);
-    size_t utf8_len = (wcs_len + 1) * UTF8_SEQUENCE_MAXLEN;
-    char **inbuf = (char **)&input;
-    char **outbuf = (char **)&output;
-    size_t ret = iconv(cd, inbuf, &wcs_len, outbuf, &utf8_len);
-    if (ret == (size_t)-1)
-    {
-        wprintf(L"Error converting wchar string to utf8 - %ls\n", input);
-        exit(ECVRT);
-    }
-    iconv_close(cd);
-}
-
 static bool is_printable_ascii(char *string)
 {
     for (size_t i = 0; string[i] != '\0'; i++)
@@ -368,49 +347,41 @@ void read_from_rc(char *path)
         exit(EOPEN);
     }
 
-    wchar_t line[256];
-    while (fgetws(line, sizeof(line), rc_file) != NULL)
+    char *line = NULL;
+    size_t line_capacity = 0;
+    ssize_t line_length;
+    while ((line_length = getline(&line, &line_capacity, rc_file)) != -1)
     {
-        // Tokenize to get key=value
-        wchar_t *state = NULL;
-        wchar_t *key = wcstok(line, L"=", &state);
-        if (key)
+        // Strip trailing newline and carriage return
+        while (line_length > 0 &&
+               (line[line_length - 1] == '\n' || line[line_length - 1] == '\r'))
         {
-            wchar_t *value = wcstok(NULL, L"", &state);
-            if (value)
-            {
-                wchar_t *newline = wcschr(value, L'\n');
-                // Handle overflow
-                if (newline == NULL){
-                    wprintf(L"Trigger & Expansion pair too long for trigger = %ls\n", key);
-                    exit(EOVER);
-                }
-                if (newline)
-                {
-                    *newline = L'\0';
-                }
-                // Convert wide strings to utf8
-                size_t wcs_key_len = (wcslen(key) + 1) * sizeof(wchar_t);
-                size_t utf8_key_len = (wcs_key_len + 1) * UTF8_SEQUENCE_MAXLEN;
-                char *utf_key = malloc(utf8_key_len);
-                size_t wcs_value_len = (wcslen(value) + 1) * sizeof(wchar_t);
-                size_t utf8_value_len = (wcs_value_len + 1) * UTF8_SEQUENCE_MAXLEN;
-                char *utf_value = malloc(utf8_value_len);
-                wide_to_utf8(key, utf_key);
-                wide_to_utf8(value, utf_value);
-                if (!is_printable_ascii(utf_key) || !is_printable_ascii(utf_value))
-                {
-                    printf("Warning: skipping non-ASCII expansion for trigger %s\n", utf_key);
-                    free(utf_key);
-                    free(utf_value);
-                    continue;
-                }
-                push_trie(utf_key, utf_value);
-                free(utf_key);
-                free(utf_value);
-            }
+            line[--line_length] = '\0';
         }
+
+        // Split into trigger and expansion
+        char *separator = strchr(line, '=');
+        if (separator == NULL)
+        {
+            continue;
+        }
+        *separator = '\0';
+
+        char *key = line;
+        char *value = separator + 1;
+        if (*key == '\0')
+        {
+            continue;
+        }
+
+        if (!is_printable_ascii(key) || !is_printable_ascii(value))
+        {
+            printf("Warning: skipping non-ASCII expansion for trigger %s\n", key);
+            continue;
+        }
+        push_trie(key, value);
     }
+    free(line);
     fclose(rc_file);
 }
 
@@ -936,7 +907,6 @@ void read_keyboard_env()
 
 int main(int argc, char *argv[])
 {
-    setlocale(LC_ALL, "");
     set_env_vars();
     if (argc < 2)
     {
