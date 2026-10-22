@@ -24,14 +24,14 @@
 #define ECREATE 8
 #define EWRITE 9
 #define EENV 10
-#define EPERM 11
+#define ENOPRIV 11
 #define EFORK 12
 #define ELEAD 13
 #define ECHDIR 14
 #define ERENAM 15
 #define EPGREP 16
 #define ECMD 17
-#define EPIPE 18
+#define EPIPEFAIL 18
 #define EUSAGE 19
 #define ESTR 20
 #define EUSER 21

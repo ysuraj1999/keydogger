@@ -8,10 +8,14 @@
 #include <stdbool.h>
 #include <string.h>
 #include <signal.h>
+#include <errno.h>
+#include <poll.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
 
 #include "keydogger.h"
+
+#define STARTUP_TIMEOUT_MS 5000
 
 extern char **environ;
 
@@ -28,6 +32,7 @@ char *DEBUG_RC_PATH = "./keydoggerrc";
 
 static int fkeyboard_device;
 static int vkeyboard_device;
+static int ready_fd = -1;
 
 // Direct mapping of char codes to linux key codes
 static int char_codes_to_key_codes[] = {
@@ -633,6 +638,25 @@ void keydogger_daemon()
 
     init_key_to_position_map();
 
+    // Let the parent process know that startup succeeded
+    if (ready_fd >= 0)
+    {
+        char ready_message[64];
+        int ready_length = snprintf(ready_message, sizeof(ready_message),
+                                    "keydoggerd started at pid %d\n", getpid());
+        if (ready_length > 0)
+        {
+            size_t ready_size = (size_t)ready_length;
+            if (ready_size >= sizeof(ready_message))
+            {
+                ready_size = sizeof(ready_message) - 1;
+            }
+            write(ready_fd, ready_message, ready_size);
+        }
+        close(ready_fd);
+        ready_fd = -1;
+    }
+
     struct input_event event = {0};
     struct trie *current_trie = TRIE;
     while (1)
@@ -745,31 +769,69 @@ void keydogger_daemon()
 void daemonize_keydogger()
 {
     int fd;
+    int ready_pipe[2];
     pid_t pid;
     pid_t sid;
     sigset_t sigset;
-    for (fd = sysconf(_SC_OPEN_MAX); fd >= 0; fd--)
-        close(fd);
 
-    for (int i = 1; i < _NSIG; i++)
+    if (pipe(ready_pipe) < 0)
     {
-        if (i != SIGKILL && i != SIGSTOP)
-            signal(i, SIG_DFL);
+        perror("Error creating startup pipe");
+        exit(EPIPEFAIL);
     }
-
-    sigemptyset(&sigset);
-    sigprocmask(SIG_SETMASK, &sigset, NULL);
 
     if ((pid = fork()) < 0)
     {
         printf("Error forking 1\n");
         exit(EFORK);
     }
-    // exit Parent
+
+    // Parent waits until the daemon has finished initializing
     if (pid > 0)
     {
+        close(ready_pipe[1]);
+
+        struct pollfd poll_fd = {0};
+        poll_fd.fd = ready_pipe[0];
+        poll_fd.events = POLLIN;
+
+        int poll_status;
+        do
+        {
+            poll_status = poll(&poll_fd, 1, STARTUP_TIMEOUT_MS);
+        } while (poll_status < 0 && errno == EINTR);
+
+        if (poll_status == 0)
+        {
+            printf("Timed out waiting for keydoggerd to start\n");
+            exit(EXIT_FAILURE);
+        }
+        if (poll_status < 0)
+        {
+            perror("Error waiting for keydoggerd");
+            exit(EXIT_FAILURE);
+        }
+
+        char message[256];
+        ssize_t message_length;
+        do
+        {
+            message_length = read(ready_pipe[0], message, sizeof(message) - 1);
+        } while (message_length < 0 && errno == EINTR);
+
+        if (message_length <= 0)
+        {
+            printf("keydoggerd failed to start; check /var/log/keydogger.log\n");
+            exit(EXIT_FAILURE);
+        }
+
+        message[message_length] = '\0';
+        printf("%s", message);
         exit(EXIT_SUCCESS);
     }
+
+    // First child detaches from the controlling terminal
+    close(ready_pipe[0]);
 
     if ((sid = setsid()) < 0)
     {
@@ -785,8 +847,11 @@ void daemonize_keydogger()
     // exit Child1
     if (pid > 0)
     {
-        exit(EXIT_SUCCESS);
+        _exit(EXIT_SUCCESS);
     }
+
+    // Final daemon process
+    ready_fd = ready_pipe[1];
 
     if (prctl(PR_SET_NAME, DAEMON) < 0)
     {
@@ -794,7 +859,7 @@ void daemonize_keydogger()
         exit(ERENAM);
     }
 
-    fd = open("/var/log/keydogger.log", O_RDWR | O_CREAT | O_APPEND);
+    fd = open("/var/log/keydogger.log", O_RDWR | O_CREAT | O_APPEND, 0644);
     if (fd < 0)
     {
         printf("Error opening %s\n", "/var/log/keydogger.log");
@@ -803,6 +868,25 @@ void daemonize_keydogger()
     dup2(fd, STDIN_FILENO);
     dup2(fd, STDOUT_FILENO);
     dup2(fd, STDERR_FILENO);
+
+    // Close inherited descriptors, keeping the readiness pipe
+    long max_fd = sysconf(_SC_OPEN_MAX);
+    for (long open_fd = max_fd - 1; open_fd > STDERR_FILENO; open_fd--)
+    {
+        if (open_fd != ready_fd)
+        {
+            close((int)open_fd);
+        }
+    }
+
+    for (int i = 1; i < _NSIG; i++)
+    {
+        if (i != SIGKILL && i != SIGSTOP)
+            signal(i, SIG_DFL);
+    }
+
+    sigemptyset(&sigset);
+    sigprocmask(SIG_SETMASK, &sigset, NULL);
 
     umask(0);
 
@@ -857,7 +941,7 @@ int is_running()
     if ((pgrep = popen(command, "r")) == NULL)
     {
         printf("Unable to check if \"%s\" daemon is running or not.\n", DAEMON);
-        exit(EPIPE);
+        exit(EPIPEFAIL);
     }
     items_read = fscanf(pgrep, "%d", &pid);
     pclose(pgrep);
@@ -917,7 +1001,7 @@ int main(int argc, char *argv[])
     if (!check_privileges())
     {
         printf("Need sudo privileges\n");
-        exit(EPERM);
+        exit(ENOPRIV);
     }
 
     pid_t pid;
