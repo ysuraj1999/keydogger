@@ -29,8 +29,6 @@
 #define ELEAD 13
 #define ECHDIR 14
 #define ERENAM 15
-#define EPGREP 16
-#define ECMD 17
 #define EPIPEFAIL 18
 #define EUSAGE 19
 #define ESTR 20

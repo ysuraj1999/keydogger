@@ -10,12 +10,14 @@
 #include <signal.h>
 #include <errno.h>
 #include <poll.h>
+#include <sys/file.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
 
 #include "keydogger.h"
 
 #define STARTUP_TIMEOUT_MS 5000
+#define SHUTDOWN_TIMEOUT_MS 5000
 
 extern char **environ;
 
@@ -30,9 +32,10 @@ static struct trie *TRIE = NULL;
 
 char *DEBUG_RC_PATH = "./keydoggerrc";
 
-static int fkeyboard_device;
-static int vkeyboard_device;
+static int fkeyboard_device = -1;
+static int vkeyboard_device = -1;
 static int ready_fd = -1;
+static int pidfile_fd = -1;
 
 // Direct mapping of char codes to linux key codes
 static int char_codes_to_key_codes[] = {
@@ -304,13 +307,158 @@ void cleanup_trie(struct trie *trie)
     }
 }
 
+static bool is_daemon_pid(pid_t pid)
+{
+    if (pid <= 0)
+    {
+        return false;
+    }
+    if (kill(pid, 0) < 0 && errno != EPERM)
+    {
+        return false;
+    }
+
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+    FILE *comm_file = fopen(path, "r");
+    if (comm_file == NULL)
+    {
+        return true;
+    }
+
+    char comm[32] = {0};
+    bool has_comm = fgets(comm, sizeof(comm), comm_file) != NULL;
+    fclose(comm_file);
+    if (!has_comm)
+    {
+        return true;
+    }
+
+    comm[strcspn(comm, "\n")] = '\0';
+    return strcmp(comm, DAEMON) == 0;
+}
+
+static pid_t read_pidfile()
+{
+    int fd = open(PID_PATH, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+    {
+        return -1;
+    }
+
+    char buffer[32] = {0};
+    ssize_t length = read(fd, buffer, sizeof(buffer) - 1);
+    close(fd);
+
+    if (length <= 0)
+    {
+        return -1;
+    }
+
+    pid_t pid = (pid_t)strtol(buffer, NULL, 10);
+    if (is_daemon_pid(pid))
+    {
+        return pid;
+    }
+    return -1;
+}
+
+// Returns 0 on success, 1 if already running, -1 on error
+static int acquire_pidfile(pid_t *running_pid)
+{
+    int fd = open(PID_PATH, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (fd < 0)
+    {
+        return -1;
+    }
+
+    if (flock(fd, LOCK_EX | LOCK_NB) < 0)
+    {
+        if (errno == EWOULDBLOCK)
+        {
+            if (running_pid != NULL)
+            {
+                char buffer[32] = {0};
+                ssize_t length = read(fd, buffer, sizeof(buffer) - 1);
+                if (length > 0)
+                {
+                    *running_pid = (pid_t)strtol(buffer, NULL, 10);
+                }
+            }
+            close(fd);
+            return 1;
+        }
+        close(fd);
+        return -1;
+    }
+
+    ftruncate(fd, 0);
+    lseek(fd, 0, SEEK_SET);
+
+    pidfile_fd = fd;
+    return 0;
+}
+
+static int acquire_pidfile_wait(int timeout_ms)
+{
+    for (int waited = 0; waited < timeout_ms; waited += 100)
+    {
+        int status = acquire_pidfile(NULL);
+        if (status == 0)
+        {
+            return 0;
+        }
+        if (status < 0)
+        {
+            return -1;
+        }
+        usleep(100 * 1000);
+    }
+    return -1;
+}
+
+static void pidfile_write_pid()
+{
+    if (pidfile_fd < 0)
+    {
+        return;
+    }
+    if (ftruncate(pidfile_fd, 0) == 0)
+    {
+        lseek(pidfile_fd, 0, SEEK_SET);
+        dprintf(pidfile_fd, "%d\n", getpid());
+    }
+}
+
+static void pidfile_release()
+{
+    if (pidfile_fd < 0)
+    {
+        return;
+    }
+    close(pidfile_fd);
+    pidfile_fd = -1;
+}
+
 void cleanup()
 {
-    close(fkeyboard_device);
-    close(vkeyboard_device);
-    ioctl(vkeyboard_device, UI_DEV_DESTROY);
+    if (vkeyboard_device >= 0)
+    {
+        ioctl(vkeyboard_device, UI_DEV_DESTROY);
+        close(vkeyboard_device);
+        vkeyboard_device = -1;
+    }
+
+    if (fkeyboard_device >= 0)
+    {
+        close(fkeyboard_device);
+        fkeyboard_device = -1;
+    }
 
     cleanup_trie(TRIE);
+    TRIE = NULL;
+
+    pidfile_release();
 }
 
 static bool is_printable_ascii(char *string)
@@ -602,6 +750,8 @@ void signal_cleanup_handler(int sig __attribute__((unused)))
 
 void keydogger_daemon()
 {
+    signal(SIGPIPE, SIG_IGN);
+
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = signal_cleanup_handler;
@@ -637,6 +787,8 @@ void keydogger_daemon()
     init_virtual_device(vkeyboard_device);
 
     init_key_to_position_map();
+
+    pidfile_write_pid();
 
     // Let the parent process know that startup succeeded
     if (ready_fd >= 0)
@@ -780,6 +932,8 @@ void daemonize_keydogger()
         exit(EPIPEFAIL);
     }
 
+    fflush(NULL);
+
     if ((pid = fork()) < 0)
     {
         printf("Error forking 1\n");
@@ -873,7 +1027,7 @@ void daemonize_keydogger()
     long max_fd = sysconf(_SC_OPEN_MAX);
     for (long open_fd = max_fd - 1; open_fd > STDERR_FILENO; open_fd--)
     {
-        if (open_fd != ready_fd)
+        if (open_fd != ready_fd && open_fd != pidfile_fd)
         {
             close((int)open_fd);
         }
@@ -920,36 +1074,6 @@ bool check_privileges()
         i++;
     }
     return false;
-}
-
-int is_running()
-{
-    char command[50];
-    int items_read = snprintf(command, 50, "pgrep -x %s", DAEMON);
-    pid_t pid;
-    if (items_read < 0)
-    {
-        printf("Could not retrieve process\n");
-        exit(EPGREP);
-    }
-    if (items_read > 50)
-    {
-        printf("Command size too long\n");
-        exit(ECMD);
-    }
-    FILE *pgrep;
-    if ((pgrep = popen(command, "r")) == NULL)
-    {
-        printf("Unable to check if \"%s\" daemon is running or not.\n", DAEMON);
-        exit(EPIPEFAIL);
-    }
-    items_read = fscanf(pgrep, "%d", &pid);
-    pclose(pgrep);
-    if (items_read != EOF && pid > 0)
-    {
-        return pid;
-    }
-    return -1;
 }
 
 void print_trie(struct trie *trie, size_t level)
@@ -1004,14 +1128,26 @@ int main(int argc, char *argv[])
         exit(ENOPRIV);
     }
 
-    pid_t pid;
-    pid = is_running();
     if (strcmp(argv[1], "start") == 0)
     {
-        if (pid > 0)
+        pid_t running_pid = 0;
+        int pidfile_status = acquire_pidfile(&running_pid);
+        if (pidfile_status == 1)
         {
-            printf("Already running at pid %d\n", pid);
+            if (running_pid > 0)
+            {
+                printf("Already running at pid %d\n", running_pid);
+            }
+            else
+            {
+                printf("Already running\n");
+            }
             exit(EXIT_SUCCESS);
+        }
+        if (pidfile_status < 0)
+        {
+            perror("Error opening pidfile");
+            exit(EOPEN);
         }
         read_keyboard_env();
         read_from_rc(NULL);
@@ -1019,51 +1155,98 @@ int main(int argc, char *argv[])
     }
     else if (strcmp(argv[1], "status") == 0)
     {
+        pid_t pid = read_pidfile();
         if (pid > 0)
         {
             printf("keydogger running at pid %d\n", pid);
-            exit(EXIT_SUCCESS);
         }
-        printf("Not running\n");
+        else
+        {
+            printf("Not running\n");
+        }
         exit(EXIT_SUCCESS);
     }
-
     else if (strcmp(argv[1], "stop") == 0)
     {
-        if (pid < 0)
+        pid_t pid = read_pidfile();
+        if (pid <= 0)
         {
             printf("Not running\n");
             exit(EXIT_SUCCESS);
         }
-        cleanup();
-        int kill_status = kill(pid, SIGTERM);
-        if (kill_status < 0)
+        if (kill(pid, SIGTERM) < 0)
         {
-            kill(pid, SIGKILL);
+            perror("Error sending SIGTERM");
+            exit(EXIT_FAILURE);
+        }
+        printf("Sent SIGTERM to keydoggerd (pid %d)\n", pid);
+        if (kill(pid, 0) < 0 && errno == ESRCH)
+        {
+            printf("keydoggerd has exited\n");
+        }
+        else
+        {
+            printf("keydoggerd is still running\n");
         }
         exit(EXIT_SUCCESS);
     }
     else if (strcmp(argv[1], "restart") == 0)
     {
+        pid_t pid = read_pidfile();
         if (pid > 0)
         {
-            cleanup();
-            int kill_status = kill(pid, SIGTERM);
-            if (kill_status < 0)
+            if (kill(pid, SIGTERM) < 0 && errno != ESRCH)
             {
-                kill(pid, SIGKILL);
+                perror("Error sending SIGTERM");
+                exit(EXIT_FAILURE);
             }
+            printf("Sent SIGTERM to keydoggerd (pid %d)\n", pid);
         }
+
+        if (acquire_pidfile_wait(SHUTDOWN_TIMEOUT_MS) < 0)
+        {
+            printf("Timed out waiting for keydoggerd to stop\n");
+            exit(EXIT_FAILURE);
+        }
+
         read_keyboard_env();
         read_from_rc(NULL);
         daemonize_keydogger();
     }
     else if (strcmp(argv[1], "debug") == 0)
     {
+        pid_t pid = read_pidfile();
         if (pid > 0)
         {
-            kill(pid, SIGTERM);
+            if (kill(pid, SIGTERM) < 0 && errno != ESRCH)
+            {
+                perror("Error sending SIGTERM");
+                exit(EXIT_FAILURE);
+            }
+            printf("Sent SIGTERM to keydoggerd (pid %d)\n", pid);
+            if (acquire_pidfile_wait(SHUTDOWN_TIMEOUT_MS) < 0)
+            {
+                printf("Timed out waiting for keydoggerd to stop\n");
+                exit(EXIT_FAILURE);
+            }
         }
+        else
+        {
+            int pidfile_status = acquire_pidfile(NULL);
+            if (pidfile_status == 1)
+            {
+                printf("Already running\n");
+                exit(EXIT_SUCCESS);
+            }
+            if (pidfile_status < 0)
+            {
+                perror("Error opening pidfile");
+                exit(EOPEN);
+            }
+        }
+
+        prctl(PR_SET_NAME, DAEMON);
+
         read_keyboard_env();
         read_from_rc(DEBUG_RC_PATH);
         keydogger_daemon();
