@@ -4,7 +4,5 @@
 @gg=Good game folks, see you tomorrow
 @@=jarusll@the-mail.net
 :ai=explain in short and simple terms
-@install=sudo package-manager install -y
-@update=sudo package-manager update -y
-@restart=sudo keydogger stop && sudo keydogger start
+@restart=keydogger restart
 @backup=rsync -avz ~/important_files/ jarusll@homeserver:backups/

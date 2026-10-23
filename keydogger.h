@@ -110,18 +110,15 @@ struct key
     bool is_shifted;
 };
 
-void cleanup_trie(struct trie *trie);
+void trie_cleanup(struct trie *trie);
 void cleanup();
-void read_from_rc(char *path);
-bool is_supported_key_code(size_t code);
-char get_char_from_keycode(size_t keycode, bool is_shifted);
-// very unusual error, mismatch between def and impl
-// inline void send_key_to_device(int keyboard_device, struct input_event event);
+void rc_load(const char *path);
+bool is_key_code_supported(size_t code);
 void send_backspace(int device_fd, size_t n);
 void send_sync(int device_fd);
-void init_trie(struct trie *trie, struct key *key);
+void trie_init(struct trie *trie, struct key *key);
 struct key get_key_from_char(char character);
-void push_trie(char *key, char *expansion);
+void trie_push(char *key, char *expansion);
 void daemonize_keydogger();
 void keydogger_daemon();
 void init_virtual_device(int vkeyboard_device);

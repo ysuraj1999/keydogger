@@ -5,12 +5,10 @@
 
 > Keydogger is a tiny text expander written in C
 
-> [!WARNING]
-> This is a privileged application. Hence it NEEDS sudo privileges. I have tried to keep the codebase small to reduce the footprint
-
 ## Prerequisites
 - `gcc`
 - `make`
+- `input` permission for your user
 
 ```bash
 git clone https://github.com/jarusll/keydogger.git
@@ -24,16 +22,17 @@ It should be of the pattern `/dev/input/eventX`. X will be different for your sy
 
 ## Installation
 
-To install, run the following as sudo
+Install for the current user (no root required)
 ```bash
-make clean install
+make clean install-user
 ```
+This installs the binary to `~/.local/bin/keydogger`.
 
 ## Testing
 You can test out sample expansions from the local `keydoggerrc` file by
 ```bash
 make clean build
-sudo ./keydogger debug
+./keydogger debug
 ```
 
 ## Usage
@@ -51,25 +50,20 @@ Here are some sample expansions you might like
 @gg=Good game folks, see you tomorrow
 @@=jarusll@the-mail.net
 :ai=explain in short and simple terms
-@install=sudo package-manager install -y
-@update=sudo package-manager update -y
-@restart=sudo keydogger stop && sudo keydogger start
-@backup=rsync -avz ~/important_files/ jarusll@homeserver:backups/
+
+@backup=rsync -avz ~/important_files/ ysuraj1999@homeserver:backups/
 ```
 
 ### Commands
 ```bash
-# -E flag to preseve env variables if you've already set KEYDOGGER_KEYBOARD
-sudo -E keydogger start
-# Here's another way to pass env variables
-sudo env KEYDOGGER_KEYBOARD=/dev/input/event<N> keydogger status
+export KEYDOGGER_KEYBOARD=/dev/input/event<N>
 
-sudo keydogger status
-
-sudo keydogger stop
+keydogger start
+keydogger status
+keydogger stop
 
 # Restart if you want to switch keyboards or reload expansions
-sudo -E keydogger restart
+keydogger restart
 ```
 
 ## TODO

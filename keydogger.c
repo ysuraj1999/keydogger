@@ -272,7 +272,7 @@ void init_key_to_position_map()
     key_codes_to_position[KEY_GRAVE | FLAG_UPPERCASE] = 125;
 }
 
-void cleanup_trie(struct trie *trie)
+void trie_cleanup(struct trie *trie)
 {
     if (trie == NULL)
     {
@@ -283,13 +283,13 @@ void cleanup_trie(struct trie *trie)
         free(trie->expansion);
         for (size_t i = 0; i < READABLE_KEYS; i++)
         {
-            cleanup_trie(trie->next[i]);
+            trie_cleanup(trie->next[i]);
         }
         free(trie);
     }
 }
 
-static bool is_daemon_pid(pid_t pid)
+static bool pid_is_daemon(pid_t pid)
 {
     if (pid <= 0)
     {
@@ -320,7 +320,7 @@ static bool is_daemon_pid(pid_t pid)
     return strcmp(comm, DAEMON) == 0;
 }
 
-static void init_runtime_path()
+static void pidfile_path_init()
 {
     const char *runtime_dir = getenv("XDG_RUNTIME_DIR");
     if (runtime_dir == NULL || runtime_dir[0] == '\0')
@@ -352,7 +352,7 @@ static void init_runtime_path()
     }
 
     int length = snprintf(pidfile_path, sizeof(pidfile_path),
-                          "%s/keydogger.pid", runtime_dir);
+                    "%s/keydogger.pid", runtime_dir);
     if (length < 0 || (size_t)length >= sizeof(pidfile_path))
     {
         fprintf(stderr, "XDG_RUNTIME_DIR is too long\n");
@@ -360,7 +360,7 @@ static void init_runtime_path()
     }
 }
 
-static pid_t read_pidfile()
+static pid_t pidfile_read()
 {
     int fd = open(pidfile_path, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
@@ -378,7 +378,7 @@ static pid_t read_pidfile()
     }
 
     pid_t pid = (pid_t)strtol(buffer, NULL, 10);
-    if (is_daemon_pid(pid))
+    if (pid_is_daemon(pid))
     {
         return pid;
     }
@@ -386,7 +386,7 @@ static pid_t read_pidfile()
 }
 
 // Returns 0 on success, 1 if already running, -1 on error
-static int acquire_pidfile(pid_t *running_pid)
+static int pidfile_acquire(pid_t *running_pid)
 {
     int fd = open(pidfile_path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
     if (fd < 0)
@@ -421,11 +421,11 @@ static int acquire_pidfile(pid_t *running_pid)
     return 0;
 }
 
-static int acquire_pidfile_wait(int timeout_ms)
+static int pidfile_acquire_wait(int timeout_ms)
 {
     for (int waited = 0; waited < timeout_ms; waited += 100)
     {
-        int status = acquire_pidfile(NULL);
+        int status = pidfile_acquire(NULL);
         if (status == 0)
         {
             return 0;
@@ -439,7 +439,7 @@ static int acquire_pidfile_wait(int timeout_ms)
     return -1;
 }
 
-static void pidfile_write_pid()
+static void pidfile_write()
 {
     if (pidfile_fd < 0)
     {
@@ -462,12 +462,13 @@ static void pidfile_release()
     pidfile_fd = -1;
 }
 
-static void cancel_wait_handler(int sig __attribute__((unused)))
+static void sigint_handler(int sig)
 {
+    (void)sig;
     cancel_wait = 1;
 }
 
-static bool wait_for_pid_exit(pid_t pid, int timeout_ms)
+static bool pid_exit_wait(pid_t pid, int timeout_ms)
 {
     for (int waited = 0; waited < timeout_ms; waited += 50)
     {
@@ -499,7 +500,7 @@ void cleanup()
         fkeyboard_device = -1;
     }
 
-    cleanup_trie(TRIE);
+    trie_cleanup(TRIE);
     TRIE = NULL;
 
     pidfile_release();
@@ -516,48 +517,11 @@ static bool is_printable_ascii(char *string)
     return true;
 }
 
-void read_from_rc(char *path)
+void rc_load(const char *path)
 {
     char rc_file_path[256];
-    const char *home = NULL;
-    struct passwd *password = NULL;
+    int path_length;
 
-    const char *sudo_user = getenv("SUDO_USER");
-    if (sudo_user != NULL && sudo_user[0] != '\0')
-    {
-        password = getpwnam(sudo_user);
-        if (password != NULL)
-        {
-            home = password->pw_dir;
-        }
-    }
-    if (home == NULL || home[0] == '\0')
-    {
-        home = getenv("HOME");
-    }
-    if (home == NULL || home[0] == '\0')
-    {
-        password = getpwuid(getuid());
-        if (password != NULL)
-        {
-            home = password->pw_dir;
-        }
-    }
-    if (home == NULL || home[0] == '\0')
-    {
-        fprintf(stderr, "Error determining home directory\n");
-        exit(EUSER);
-    }
-
-    int path_length = snprintf(rc_file_path, sizeof(rc_file_path), "%s/%s", home, RC_PATH);
-    if (path_length < 0 || (size_t)path_length >= sizeof(rc_file_path))
-    {
-        fprintf(stderr, "Error constructing config path %s\n", RC_PATH);
-        exit(ESTR);
-    }
-
-    TRIE = malloc(sizeof(struct trie));
-    init_trie(TRIE, NULL);
     if (path != NULL)
     {
         path_length = snprintf(rc_file_path, sizeof(rc_file_path), "%s", path);
@@ -567,6 +531,33 @@ void read_from_rc(char *path)
             exit(ESTR);
         }
     }
+    else
+    {
+        const char *home = getenv("HOME");
+        if (home == NULL || home[0] == '\0')
+        {
+            struct passwd *passwd_entry = getpwuid(getuid());
+            if (passwd_entry != NULL)
+            {
+                home = passwd_entry->pw_dir;
+            }
+        }
+        if (home == NULL || home[0] == '\0')
+        {
+            fprintf(stderr, "Error determining home directory\n");
+            exit(EUSER);
+        }
+
+        path_length = snprintf(rc_file_path, sizeof(rc_file_path), "%s/%s", home, RC_PATH);
+        if (path_length < 0 || (size_t)path_length >= sizeof(rc_file_path))
+        {
+            fprintf(stderr, "Error constructing config path %s\n", RC_PATH);
+            exit(ESTR);
+        }
+    }
+
+    TRIE = malloc(sizeof(struct trie));
+    trie_init(TRIE, NULL);
     FILE *rc_file = fopen(rc_file_path, "r");
     if (rc_file == NULL)
     {
@@ -581,7 +572,7 @@ void read_from_rc(char *path)
     {
         // Strip trailing newline and carriage return
         while (line_length > 0 &&
-               (line[line_length - 1] == '\n' || line[line_length - 1] == '\r'))
+            (line[line_length - 1] == '\n' || line[line_length - 1] == '\r'))
         {
             line[--line_length] = '\0';
         }
@@ -606,13 +597,13 @@ void read_from_rc(char *path)
             fprintf(stderr, "Warning: skipping non-ASCII expansion for trigger %s\n", key);
             continue;
         }
-        push_trie(key, value);
+        trie_push(key, value);
     }
     free(line);
     fclose(rc_file);
 }
 
-bool is_supported_key_code(size_t code)
+bool is_key_code_supported(size_t code)
 {
     // 2 -> 13 = 1 -> =
     if (code >= KEY_1 && code <= KEY_EQUAL)
@@ -725,7 +716,7 @@ void send_to_keyboard(char *string)
     send_sync(vkeyboard_device);
 }
 
-void init_trie(struct trie *trie, struct key *key)
+void trie_init(struct trie *trie, struct key *key)
 {
     trie->character = '\0';
     trie->is_shifted = false;
@@ -745,7 +736,7 @@ void init_trie(struct trie *trie, struct key *key)
     }
 }
 
-void push_trie(char *key, char *expansion)
+void trie_push(char *key, char *expansion)
 {
     struct trie *current_trie = TRIE;
     for (size_t i = 0; i < strlen(key); i++)
@@ -756,7 +747,7 @@ void push_trie(char *key, char *expansion)
         if (current_trie->next[position] == NULL)
         {
             current_trie->next[position] = malloc(sizeof(struct trie));
-            init_trie(current_trie->next[position], &key);
+            trie_init(current_trie->next[position], &key);
             current_trie->next[position]->size = current_trie->size + 1;
             current_trie->next[position]->parent = current_trie;
         }
@@ -862,7 +853,7 @@ void keydogger_daemon()
 
     init_key_to_position_map();
 
-    pidfile_write_pid();
+    pidfile_write();
 
     // Let the parent process know that startup succeeded
     if (ready_fd >= 0)
@@ -899,7 +890,7 @@ void keydogger_daemon()
             continue;
         }
         // ignore if keydogger doesnt recognize the key
-        if (is_supported_key_code(event.code) == false)
+        if (is_key_code_supported(event.code) == false)
         {
             continue;
         }
@@ -1161,10 +1152,10 @@ int main(int argc, char *argv[])
 
     if (strcmp(argv[1], "start") == 0)
     {
-        init_runtime_path();
+        pidfile_path_init();
 
         pid_t running_pid = 0;
-        int pidfile_status = acquire_pidfile(&running_pid);
+        int pidfile_status = pidfile_acquire(&running_pid);
         if (pidfile_status == 1)
         {
             if (running_pid > 0)
@@ -1183,14 +1174,14 @@ int main(int argc, char *argv[])
             exit(EOPEN);
         }
         read_keyboard_env();
-        read_from_rc(NULL);
+        rc_load(NULL);
         daemonize_keydogger();
     }
     else if (strcmp(argv[1], "status") == 0)
     {
-        init_runtime_path();
+        pidfile_path_init();
 
-        pid_t pid = read_pidfile();
+        pid_t pid = pidfile_read();
         if (pid > 0)
         {
             printf("keydogger running at pid %d\n", pid);
@@ -1203,9 +1194,9 @@ int main(int argc, char *argv[])
     }
     else if (strcmp(argv[1], "stop") == 0)
     {
-        init_runtime_path();
+        pidfile_path_init();
 
-        pid_t pid = read_pidfile();
+        pid_t pid = pidfile_read();
         if (pid <= 0)
         {
             printf("Not running\n");
@@ -1225,11 +1216,11 @@ int main(int argc, char *argv[])
 
         struct sigaction cancel_action;
         memset(&cancel_action, 0, sizeof(cancel_action));
-        cancel_action.sa_handler = cancel_wait_handler;
+        cancel_action.sa_handler = sigint_handler;
         sigemptyset(&cancel_action.sa_mask);
         sigaction(SIGINT, &cancel_action, NULL);
 
-        if (wait_for_pid_exit(pid, SHUTDOWN_TIMEOUT_MS))
+        if (pid_exit_wait(pid, SHUTDOWN_TIMEOUT_MS))
         {
             printf("keydoggerd stopped (pid %d)\n", pid);
             exit(EXIT_SUCCESS);
@@ -1246,9 +1237,9 @@ int main(int argc, char *argv[])
     }
     else if (strcmp(argv[1], "restart") == 0)
     {
-        init_runtime_path();
+        pidfile_path_init();
 
-        pid_t pid = read_pidfile();
+        pid_t pid = pidfile_read();
         if (pid > 0)
         {
             if (kill(pid, SIGTERM) < 0 && errno != ESRCH)
@@ -1259,21 +1250,21 @@ int main(int argc, char *argv[])
             printf("Sent SIGTERM to keydoggerd (pid %d)\n", pid);
         }
 
-        if (acquire_pidfile_wait(SHUTDOWN_TIMEOUT_MS) < 0)
+        if (pidfile_acquire_wait(SHUTDOWN_TIMEOUT_MS) < 0)
         {
             fprintf(stderr, "Timed out waiting for keydoggerd to stop\n");
             exit(EXIT_FAILURE);
         }
 
         read_keyboard_env();
-        read_from_rc(NULL);
+        rc_load(NULL);
         daemonize_keydogger();
     }
     else if (strcmp(argv[1], "debug") == 0)
     {
-        init_runtime_path();
+        pidfile_path_init();
 
-        pid_t pid = read_pidfile();
+        pid_t pid = pidfile_read();
         if (pid > 0)
         {
             if (kill(pid, SIGTERM) < 0 && errno != ESRCH)
@@ -1282,7 +1273,7 @@ int main(int argc, char *argv[])
                 exit(EXIT_FAILURE);
             }
             printf("Sent SIGTERM to keydoggerd (pid %d)\n", pid);
-            if (acquire_pidfile_wait(SHUTDOWN_TIMEOUT_MS) < 0)
+            if (pidfile_acquire_wait(SHUTDOWN_TIMEOUT_MS) < 0)
             {
                 fprintf(stderr, "Timed out waiting for keydoggerd to stop\n");
                 exit(EXIT_FAILURE);
@@ -1290,7 +1281,7 @@ int main(int argc, char *argv[])
         }
         else
         {
-            int pidfile_status = acquire_pidfile(NULL);
+            int pidfile_status = pidfile_acquire(NULL);
             if (pidfile_status == 1)
             {
                 printf("Already running\n");
@@ -1306,12 +1297,12 @@ int main(int argc, char *argv[])
         prctl(PR_SET_NAME, DAEMON);
 
         read_keyboard_env();
-        read_from_rc(DEBUG_RC_PATH);
+        rc_load(DEBUG_RC_PATH);
         keydogger_daemon();
     }
     else if (strcmp(argv[1], "viz") == 0)
     {
-        read_from_rc(DEBUG_RC_PATH);
+        rc_load(DEBUG_RC_PATH);
         print_trie(TRIE, 0);
     }
     else
