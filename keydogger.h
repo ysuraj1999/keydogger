@@ -1,6 +1,8 @@
 #include <linux/input-event-codes.h>
+#include <linux/input.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <sys/types.h>
 
 #ifndef KEYDOGGER_H
 #define KEYDOGGER_H
@@ -110,19 +112,40 @@ struct key
     bool is_shifted;
 };
 
+bool pid_is_daemon(pid_t pid);
+void pidfile_path_init(void);
+pid_t pidfile_read(void);
+int pidfile_acquire(pid_t *running_pid);
+int pidfile_acquire_wait(int timeout_ms);
+void pidfile_write(void);
+void pidfile_release(void);
+void sigint_handler(int sig);
+bool pid_exit_wait(pid_t pid, int timeout_ms);
+bool try_send_key_to_device(int fd, struct input_event event);
+bool try_send_sync(int fd);
+bool is_printable_ascii(char *string);
+void keyboard_disconnect(size_t index);
+char *trim_whitespace(char *text);
+
 void trie_cleanup(struct trie *trie);
-void cleanup();
+void cleanup(void);
 void rc_load(const char *path);
 bool is_key_code_supported(size_t code);
+void send_key_to_device(int keyboard_device, struct input_event event);
 void send_backspace(int device_fd, size_t n);
 void send_sync(int device_fd);
+void send_shift_down(int device_fd);
+void send_shift_up(int device_fd);
+void send_to_keyboard(char *string);
 void trie_init(struct trie *trie, struct key *key);
 struct key get_key_from_char(char character);
 void trie_push(char *key, char *expansion);
-void daemonize_keydogger();
-void keydogger_daemon();
 void init_virtual_device(int vkeyboard_device);
+void signal_cleanup_handler(int sig);
+void keydogger_daemon(void);
+void daemonize_keydogger(void);
 void print_trie(struct trie *trie, size_t level);
-void read_keyboard_env();
+void read_keyboard_env(void);
+void init_key_to_position_map(void);
 
 #endif

@@ -10,7 +10,7 @@ build: keydogger.h keydogger.c
 
 .PHONY: dev
 dev: keydogger.h keydogger.c
-	gcc -DDEBUG_MODE=1 -DKEYDOGGER_KEYBOARD=\"$(KEYDOGGER_KEYBOARD)\" -g -O0 keydogger.c -o keydogger -Wall  -Wextra -Wpedantic -Wsign-conversion -Wimplicit-function-declaration -Warray-bounds
+	gcc -DDEBUG_MODE=1 -DKEYDOGGER_KEYBOARD=\"$(KEYDOGGER_KEYBOARD)\" -g -O0 keydogger.c -o keydogger -Wall  -Wextra -Wpedantic -Wsign-conversion -Wimplicit-function-declaration -Wmissing-prototypes -Warray-bounds
 
 USER_PREFIX=$(HOME)/.local/bin
 

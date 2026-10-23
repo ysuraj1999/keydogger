@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <string.h>
 #include <signal.h>
+#include <ctype.h>
 #include <errno.h>
 #include <limits.h>
 #include <poll.h>
@@ -21,26 +22,30 @@
 #define STARTUP_TIMEOUT_MS 5000
 #define SHUTDOWN_TIMEOUT_MS 5000
 
-#if DEBUG_MODE == 1
-static char *KEYBOARD_DEVICE = KEYDOGGER_KEYBOARD;
-#else
-static char *KEYBOARD_DEVICE = NULL;
-#endif
+#define MAX_KEYBOARDS 16
+
+static char *EvdevKeyboards[MAX_KEYBOARDS];
+static struct pollfd KeyboardPollfds[MAX_KEYBOARDS];
+static size_t KeyboardCount = 0;
+static int LiveKeyboards = 0;
+static int ActiveKeyboard = -1;
+
+static bool IsShifted = false;
+static struct trie *CurrentTrie = NULL;
 
 static char *DAEMON = "keydoggerd";
 static struct trie *TRIE = NULL;
 
 char *DEBUG_RC_PATH = "./keydoggerrc";
 
-static int fkeyboard_device = -1;
-static int vkeyboard_device = -1;
-static int ready_fd = -1;
-static int pidfile_fd = -1;
-static char pidfile_path[PATH_MAX];
-static volatile sig_atomic_t cancel_wait = 0;
+static int VKeyboardDevice = -1;
+static int ReadyFd = -1;
+static int PidfileFd = -1;
+static char PidfilePath[PATH_MAX];
+static volatile sig_atomic_t CancelWait = 0;
 
 // Direct mapping of char codes to linux key codes
-static int char_codes_to_key_codes[] = {
+static int CharCodesToKeyCodes[] = {
     // 0 -> 33
     -1,
     -1,
@@ -170,106 +175,106 @@ static int char_codes_to_key_codes[] = {
     KEY_GRAVE | FLAG_UPPERCASE,
 };
 
-static int key_codes_to_position[MAX_KEY_CODE];
+static int KeyCodesToPosition[MAX_KEY_CODE];
 
-void init_key_to_position_map()
+void init_key_to_position_map(void)
 {
-    memset(key_codes_to_position, -1, sizeof(key_codes_to_position));
-    key_codes_to_position[KEY_SPACE] = 31;
-    key_codes_to_position[KEY_1 | FLAG_UPPERCASE] = 32;
-    key_codes_to_position[KEY_APOSTROPHE | FLAG_UPPERCASE] = 33;
-    key_codes_to_position[KEY_3 | FLAG_UPPERCASE] = 34;
-    key_codes_to_position[KEY_4 | FLAG_UPPERCASE] = 35;
-    key_codes_to_position[KEY_5 | FLAG_UPPERCASE] = 36;
-    key_codes_to_position[KEY_7 | FLAG_UPPERCASE] = 37;
-    key_codes_to_position[KEY_APOSTROPHE] = 38;
-    key_codes_to_position[KEY_9 | FLAG_UPPERCASE] = 39;
-    key_codes_to_position[KEY_0 | FLAG_UPPERCASE] = 40;
-    key_codes_to_position[KEY_8 | FLAG_UPPERCASE] = 41;
-    key_codes_to_position[KEY_EQUAL | FLAG_UPPERCASE] = 42;
-    key_codes_to_position[KEY_COMMA] = 43;
-    key_codes_to_position[KEY_MINUS] = 44;
-    key_codes_to_position[KEY_DOT] = 45;
-    key_codes_to_position[KEY_SLASH] = 46;
-    key_codes_to_position[KEY_0] = 47;
-    key_codes_to_position[KEY_1] = 48;
-    key_codes_to_position[KEY_2] = 49;
-    key_codes_to_position[KEY_3] = 50;
-    key_codes_to_position[KEY_4] = 51;
-    key_codes_to_position[KEY_5] = 52;
-    key_codes_to_position[KEY_6] = 53;
-    key_codes_to_position[KEY_7] = 54;
-    key_codes_to_position[KEY_8] = 55;
-    key_codes_to_position[KEY_9] = 56;
-    key_codes_to_position[KEY_SEMICOLON | FLAG_UPPERCASE] = 57;
-    key_codes_to_position[KEY_SEMICOLON] = 58;
-    key_codes_to_position[KEY_COMMA | FLAG_UPPERCASE] = 59;
-    key_codes_to_position[KEY_EQUAL] = 60;
-    key_codes_to_position[KEY_DOT | FLAG_UPPERCASE] = 61;
-    key_codes_to_position[KEY_SLASH | FLAG_UPPERCASE] = 62;
-    key_codes_to_position[KEY_2 | FLAG_UPPERCASE] = 63;
-    key_codes_to_position[KEY_A | FLAG_UPPERCASE] = 64;
-    key_codes_to_position[KEY_B | FLAG_UPPERCASE] = 65;
-    key_codes_to_position[KEY_C | FLAG_UPPERCASE] = 66;
-    key_codes_to_position[KEY_D | FLAG_UPPERCASE] = 67;
-    key_codes_to_position[KEY_E | FLAG_UPPERCASE] = 68;
-    key_codes_to_position[KEY_F | FLAG_UPPERCASE] = 69;
-    key_codes_to_position[KEY_G | FLAG_UPPERCASE] = 70;
-    key_codes_to_position[KEY_H | FLAG_UPPERCASE] = 71;
-    key_codes_to_position[KEY_I | FLAG_UPPERCASE] = 72;
-    key_codes_to_position[KEY_J | FLAG_UPPERCASE] = 73;
-    key_codes_to_position[KEY_K | FLAG_UPPERCASE] = 74;
-    key_codes_to_position[KEY_L | FLAG_UPPERCASE] = 75;
-    key_codes_to_position[KEY_M | FLAG_UPPERCASE] = 76;
-    key_codes_to_position[KEY_N | FLAG_UPPERCASE] = 77;
-    key_codes_to_position[KEY_O | FLAG_UPPERCASE] = 78;
-    key_codes_to_position[KEY_P | FLAG_UPPERCASE] = 79;
-    key_codes_to_position[KEY_Q | FLAG_UPPERCASE] = 80;
-    key_codes_to_position[KEY_R | FLAG_UPPERCASE] = 81;
-    key_codes_to_position[KEY_S | FLAG_UPPERCASE] = 82;
-    key_codes_to_position[KEY_T | FLAG_UPPERCASE] = 83;
-    key_codes_to_position[KEY_U | FLAG_UPPERCASE] = 84;
-    key_codes_to_position[KEY_V | FLAG_UPPERCASE] = 85;
-    key_codes_to_position[KEY_W | FLAG_UPPERCASE] = 86;
-    key_codes_to_position[KEY_X | FLAG_UPPERCASE] = 87;
-    key_codes_to_position[KEY_Y | FLAG_UPPERCASE] = 88;
-    key_codes_to_position[KEY_Z | FLAG_UPPERCASE] = 89;
-    key_codes_to_position[KEY_LEFTBRACE] = 90;
-    key_codes_to_position[KEY_BACKSLASH] = 91;
-    key_codes_to_position[KEY_RIGHTBRACE] = 92;
-    key_codes_to_position[KEY_6 | FLAG_UPPERCASE] = 93;
-    key_codes_to_position[KEY_MINUS | FLAG_UPPERCASE] = 94;
-    key_codes_to_position[KEY_GRAVE] = 95;
-    key_codes_to_position[KEY_A] = 96;
-    key_codes_to_position[KEY_B] = 97;
-    key_codes_to_position[KEY_C] = 98;
-    key_codes_to_position[KEY_D] = 99;
-    key_codes_to_position[KEY_E] = 100;
-    key_codes_to_position[KEY_F] = 101;
-    key_codes_to_position[KEY_G] = 102;
-    key_codes_to_position[KEY_H] = 103;
-    key_codes_to_position[KEY_I] = 104;
-    key_codes_to_position[KEY_J] = 105;
-    key_codes_to_position[KEY_K] = 106;
-    key_codes_to_position[KEY_L] = 107;
-    key_codes_to_position[KEY_M] = 108;
-    key_codes_to_position[KEY_N] = 109;
-    key_codes_to_position[KEY_O] = 110;
-    key_codes_to_position[KEY_P] = 111;
-    key_codes_to_position[KEY_Q] = 112;
-    key_codes_to_position[KEY_R] = 113;
-    key_codes_to_position[KEY_S] = 114;
-    key_codes_to_position[KEY_T] = 115;
-    key_codes_to_position[KEY_U] = 116;
-    key_codes_to_position[KEY_V] = 117;
-    key_codes_to_position[KEY_W] = 118;
-    key_codes_to_position[KEY_X] = 119;
-    key_codes_to_position[KEY_Y] = 120;
-    key_codes_to_position[KEY_Z] = 121;
-    key_codes_to_position[KEY_LEFTBRACE | FLAG_UPPERCASE] = 122;
-    key_codes_to_position[KEY_BACKSLASH | FLAG_UPPERCASE] = 123;
-    key_codes_to_position[KEY_RIGHTBRACE | FLAG_UPPERCASE] = 124;
-    key_codes_to_position[KEY_GRAVE | FLAG_UPPERCASE] = 125;
+    memset(KeyCodesToPosition, -1, sizeof(KeyCodesToPosition));
+    KeyCodesToPosition[KEY_SPACE] = 31;
+    KeyCodesToPosition[KEY_1 | FLAG_UPPERCASE] = 32;
+    KeyCodesToPosition[KEY_APOSTROPHE | FLAG_UPPERCASE] = 33;
+    KeyCodesToPosition[KEY_3 | FLAG_UPPERCASE] = 34;
+    KeyCodesToPosition[KEY_4 | FLAG_UPPERCASE] = 35;
+    KeyCodesToPosition[KEY_5 | FLAG_UPPERCASE] = 36;
+    KeyCodesToPosition[KEY_7 | FLAG_UPPERCASE] = 37;
+    KeyCodesToPosition[KEY_APOSTROPHE] = 38;
+    KeyCodesToPosition[KEY_9 | FLAG_UPPERCASE] = 39;
+    KeyCodesToPosition[KEY_0 | FLAG_UPPERCASE] = 40;
+    KeyCodesToPosition[KEY_8 | FLAG_UPPERCASE] = 41;
+    KeyCodesToPosition[KEY_EQUAL | FLAG_UPPERCASE] = 42;
+    KeyCodesToPosition[KEY_COMMA] = 43;
+    KeyCodesToPosition[KEY_MINUS] = 44;
+    KeyCodesToPosition[KEY_DOT] = 45;
+    KeyCodesToPosition[KEY_SLASH] = 46;
+    KeyCodesToPosition[KEY_0] = 47;
+    KeyCodesToPosition[KEY_1] = 48;
+    KeyCodesToPosition[KEY_2] = 49;
+    KeyCodesToPosition[KEY_3] = 50;
+    KeyCodesToPosition[KEY_4] = 51;
+    KeyCodesToPosition[KEY_5] = 52;
+    KeyCodesToPosition[KEY_6] = 53;
+    KeyCodesToPosition[KEY_7] = 54;
+    KeyCodesToPosition[KEY_8] = 55;
+    KeyCodesToPosition[KEY_9] = 56;
+    KeyCodesToPosition[KEY_SEMICOLON | FLAG_UPPERCASE] = 57;
+    KeyCodesToPosition[KEY_SEMICOLON] = 58;
+    KeyCodesToPosition[KEY_COMMA | FLAG_UPPERCASE] = 59;
+    KeyCodesToPosition[KEY_EQUAL] = 60;
+    KeyCodesToPosition[KEY_DOT | FLAG_UPPERCASE] = 61;
+    KeyCodesToPosition[KEY_SLASH | FLAG_UPPERCASE] = 62;
+    KeyCodesToPosition[KEY_2 | FLAG_UPPERCASE] = 63;
+    KeyCodesToPosition[KEY_A | FLAG_UPPERCASE] = 64;
+    KeyCodesToPosition[KEY_B | FLAG_UPPERCASE] = 65;
+    KeyCodesToPosition[KEY_C | FLAG_UPPERCASE] = 66;
+    KeyCodesToPosition[KEY_D | FLAG_UPPERCASE] = 67;
+    KeyCodesToPosition[KEY_E | FLAG_UPPERCASE] = 68;
+    KeyCodesToPosition[KEY_F | FLAG_UPPERCASE] = 69;
+    KeyCodesToPosition[KEY_G | FLAG_UPPERCASE] = 70;
+    KeyCodesToPosition[KEY_H | FLAG_UPPERCASE] = 71;
+    KeyCodesToPosition[KEY_I | FLAG_UPPERCASE] = 72;
+    KeyCodesToPosition[KEY_J | FLAG_UPPERCASE] = 73;
+    KeyCodesToPosition[KEY_K | FLAG_UPPERCASE] = 74;
+    KeyCodesToPosition[KEY_L | FLAG_UPPERCASE] = 75;
+    KeyCodesToPosition[KEY_M | FLAG_UPPERCASE] = 76;
+    KeyCodesToPosition[KEY_N | FLAG_UPPERCASE] = 77;
+    KeyCodesToPosition[KEY_O | FLAG_UPPERCASE] = 78;
+    KeyCodesToPosition[KEY_P | FLAG_UPPERCASE] = 79;
+    KeyCodesToPosition[KEY_Q | FLAG_UPPERCASE] = 80;
+    KeyCodesToPosition[KEY_R | FLAG_UPPERCASE] = 81;
+    KeyCodesToPosition[KEY_S | FLAG_UPPERCASE] = 82;
+    KeyCodesToPosition[KEY_T | FLAG_UPPERCASE] = 83;
+    KeyCodesToPosition[KEY_U | FLAG_UPPERCASE] = 84;
+    KeyCodesToPosition[KEY_V | FLAG_UPPERCASE] = 85;
+    KeyCodesToPosition[KEY_W | FLAG_UPPERCASE] = 86;
+    KeyCodesToPosition[KEY_X | FLAG_UPPERCASE] = 87;
+    KeyCodesToPosition[KEY_Y | FLAG_UPPERCASE] = 88;
+    KeyCodesToPosition[KEY_Z | FLAG_UPPERCASE] = 89;
+    KeyCodesToPosition[KEY_LEFTBRACE] = 90;
+    KeyCodesToPosition[KEY_BACKSLASH] = 91;
+    KeyCodesToPosition[KEY_RIGHTBRACE] = 92;
+    KeyCodesToPosition[KEY_6 | FLAG_UPPERCASE] = 93;
+    KeyCodesToPosition[KEY_MINUS | FLAG_UPPERCASE] = 94;
+    KeyCodesToPosition[KEY_GRAVE] = 95;
+    KeyCodesToPosition[KEY_A] = 96;
+    KeyCodesToPosition[KEY_B] = 97;
+    KeyCodesToPosition[KEY_C] = 98;
+    KeyCodesToPosition[KEY_D] = 99;
+    KeyCodesToPosition[KEY_E] = 100;
+    KeyCodesToPosition[KEY_F] = 101;
+    KeyCodesToPosition[KEY_G] = 102;
+    KeyCodesToPosition[KEY_H] = 103;
+    KeyCodesToPosition[KEY_I] = 104;
+    KeyCodesToPosition[KEY_J] = 105;
+    KeyCodesToPosition[KEY_K] = 106;
+    KeyCodesToPosition[KEY_L] = 107;
+    KeyCodesToPosition[KEY_M] = 108;
+    KeyCodesToPosition[KEY_N] = 109;
+    KeyCodesToPosition[KEY_O] = 110;
+    KeyCodesToPosition[KEY_P] = 111;
+    KeyCodesToPosition[KEY_Q] = 112;
+    KeyCodesToPosition[KEY_R] = 113;
+    KeyCodesToPosition[KEY_S] = 114;
+    KeyCodesToPosition[KEY_T] = 115;
+    KeyCodesToPosition[KEY_U] = 116;
+    KeyCodesToPosition[KEY_V] = 117;
+    KeyCodesToPosition[KEY_W] = 118;
+    KeyCodesToPosition[KEY_X] = 119;
+    KeyCodesToPosition[KEY_Y] = 120;
+    KeyCodesToPosition[KEY_Z] = 121;
+    KeyCodesToPosition[KEY_LEFTBRACE | FLAG_UPPERCASE] = 122;
+    KeyCodesToPosition[KEY_BACKSLASH | FLAG_UPPERCASE] = 123;
+    KeyCodesToPosition[KEY_RIGHTBRACE | FLAG_UPPERCASE] = 124;
+    KeyCodesToPosition[KEY_GRAVE | FLAG_UPPERCASE] = 125;
 }
 
 void trie_cleanup(struct trie *trie)
@@ -289,7 +294,7 @@ void trie_cleanup(struct trie *trie)
     }
 }
 
-static bool pid_is_daemon(pid_t pid)
+bool pid_is_daemon(pid_t pid)
 {
     if (pid <= 0)
     {
@@ -320,7 +325,7 @@ static bool pid_is_daemon(pid_t pid)
     return strcmp(comm, DAEMON) == 0;
 }
 
-static void pidfile_path_init()
+void pidfile_path_init(void)
 {
     const char *runtime_dir = getenv("XDG_RUNTIME_DIR");
     if (runtime_dir == NULL || runtime_dir[0] == '\0')
@@ -351,18 +356,18 @@ static void pidfile_path_init()
         exit(EXIT_FAILURE);
     }
 
-    int length = snprintf(pidfile_path, sizeof(pidfile_path),
+    int length = snprintf(PidfilePath, sizeof(PidfilePath),
                     "%s/keydogger.pid", runtime_dir);
-    if (length < 0 || (size_t)length >= sizeof(pidfile_path))
+    if (length < 0 || (size_t)length >= sizeof(PidfilePath))
     {
         fprintf(stderr, "XDG_RUNTIME_DIR is too long\n");
         exit(EXIT_FAILURE);
     }
 }
 
-static pid_t pidfile_read()
+pid_t pidfile_read(void)
 {
-    int fd = open(pidfile_path, O_RDONLY | O_CLOEXEC);
+    int fd = open(PidfilePath, O_RDONLY | O_CLOEXEC);
     if (fd < 0)
     {
         return -1;
@@ -386,9 +391,9 @@ static pid_t pidfile_read()
 }
 
 // Returns 0 on success, 1 if already running, -1 on error
-static int pidfile_acquire(pid_t *running_pid)
+int pidfile_acquire(pid_t *running_pid)
 {
-    int fd = open(pidfile_path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    int fd = open(PidfilePath, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
     if (fd < 0)
     {
         return -1;
@@ -417,11 +422,11 @@ static int pidfile_acquire(pid_t *running_pid)
     ftruncate(fd, 0);
     lseek(fd, 0, SEEK_SET);
 
-    pidfile_fd = fd;
+    PidfileFd = fd;
     return 0;
 }
 
-static int pidfile_acquire_wait(int timeout_ms)
+int pidfile_acquire_wait(int timeout_ms)
 {
     for (int waited = 0; waited < timeout_ms; waited += 100)
     {
@@ -439,36 +444,36 @@ static int pidfile_acquire_wait(int timeout_ms)
     return -1;
 }
 
-static void pidfile_write()
+void pidfile_write(void)
 {
-    if (pidfile_fd < 0)
+    if (PidfileFd < 0)
     {
         return;
     }
-    if (ftruncate(pidfile_fd, 0) == 0)
+    if (ftruncate(PidfileFd, 0) == 0)
     {
-        lseek(pidfile_fd, 0, SEEK_SET);
-        dprintf(pidfile_fd, "%d\n", getpid());
+        lseek(PidfileFd, 0, SEEK_SET);
+        dprintf(PidfileFd, "%d\n", getpid());
     }
 }
 
-static void pidfile_release()
+void pidfile_release(void)
 {
-    if (pidfile_fd < 0)
+    if (PidfileFd < 0)
     {
         return;
     }
-    close(pidfile_fd);
-    pidfile_fd = -1;
+    close(PidfileFd);
+    PidfileFd = -1;
 }
 
-static void sigint_handler(int sig)
+void sigint_handler(int sig)
 {
     (void)sig;
-    cancel_wait = 1;
+    CancelWait = 1;
 }
 
-static bool pid_exit_wait(pid_t pid, int timeout_ms)
+bool pid_exit_wait(pid_t pid, int timeout_ms)
 {
     for (int waited = 0; waited < timeout_ms; waited += 50)
     {
@@ -476,7 +481,7 @@ static bool pid_exit_wait(pid_t pid, int timeout_ms)
         {
             return true;
         }
-        if (cancel_wait)
+        if (CancelWait)
         {
             return false;
         }
@@ -485,20 +490,30 @@ static bool pid_exit_wait(pid_t pid, int timeout_ms)
     return kill(pid, 0) < 0 && errno == ESRCH;
 }
 
-void cleanup()
+void cleanup(void)
 {
-    if (vkeyboard_device >= 0)
+    if (VKeyboardDevice >= 0)
     {
-        ioctl(vkeyboard_device, UI_DEV_DESTROY);
-        close(vkeyboard_device);
-        vkeyboard_device = -1;
+        ioctl(VKeyboardDevice, UI_DEV_DESTROY);
+        close(VKeyboardDevice);
+        VKeyboardDevice = -1;
     }
 
-    if (fkeyboard_device >= 0)
+    for (size_t i = 0; i < KeyboardCount; i++)
     {
-        close(fkeyboard_device);
-        fkeyboard_device = -1;
+        if (KeyboardPollfds[i].fd >= 0)
+        {
+            close(KeyboardPollfds[i].fd);
+            KeyboardPollfds[i].fd = -1;
+        }
+        free(EvdevKeyboards[i]);
+        EvdevKeyboards[i] = NULL;
     }
+    KeyboardCount = 0;
+    LiveKeyboards = 0;
+    ActiveKeyboard = -1;
+    CurrentTrie = NULL;
+    IsShifted = false;
 
     trie_cleanup(TRIE);
     TRIE = NULL;
@@ -506,7 +521,26 @@ void cleanup()
     pidfile_release();
 }
 
-static bool is_printable_ascii(char *string)
+bool try_send_key_to_device(int fd, struct input_event event)
+{
+    ssize_t written;
+    do
+    {
+        written = write(fd, &event, sizeof(event));
+    } while (written < 0 && errno == EINTR);
+
+    return written == (ssize_t)sizeof(event);
+}
+
+bool try_send_sync(int fd)
+{
+    struct input_event event = {0};
+    event.type = EV_SYN;
+    event.value = SYN_REPORT;
+    return try_send_key_to_device(fd, event);
+}
+
+bool is_printable_ascii(char *string)
 {
     for (size_t i = 0; string[i] != '\0'; i++)
     {
@@ -629,7 +663,7 @@ struct key get_key_from_char(char character)
     key.character = character;
     key.is_shifted = false;
     int position = (int)character - 1;
-    int keycode = char_codes_to_key_codes[position];
+    int keycode = CharCodesToKeyCodes[position];
     if (keycode & FLAG_UPPERCASE)
     {
         key.is_shifted = true;
@@ -704,16 +738,16 @@ void send_to_keyboard(char *string)
         event.code = key.keycode;
         event.value = 1;
         if (key.is_shifted)
-            send_shift_down(vkeyboard_device);
-        send_key_to_device(vkeyboard_device, event);
+            send_shift_down(VKeyboardDevice);
+        send_key_to_device(VKeyboardDevice, event);
         usleep(SLEEP_TIME);
         event.value = 0;
-        send_key_to_device(vkeyboard_device, event);
+        send_key_to_device(VKeyboardDevice, event);
         usleep(SLEEP_TIME);
         if (key.is_shifted)
-            send_shift_up(vkeyboard_device);
+            send_shift_up(VKeyboardDevice);
     }
-    send_sync(vkeyboard_device);
+    send_sync(VKeyboardDevice);
 }
 
 void trie_init(struct trie *trie, struct key *key)
@@ -807,13 +841,44 @@ void init_virtual_device(int vkeyboard_device)
     };
 }
 
-void signal_cleanup_handler(int sig __attribute__((unused)))
+void signal_cleanup_handler(int sig)
 {
+    (void)sig;
     cleanup();
     exit(0);
 }
 
-void keydogger_daemon()
+void keyboard_disconnect(size_t index)
+{
+    int fd = KeyboardPollfds[index].fd;
+    if (fd < 0)
+    {
+        return;
+    }
+
+    close(fd);
+    KeyboardPollfds[index].fd = -1;
+    KeyboardPollfds[index].events = 0;
+    KeyboardPollfds[index].revents = 0;
+    LiveKeyboards--;
+
+    fprintf(stderr, "Warning: keyboard %s disconnected\n", EvdevKeyboards[index]);
+
+    if (fd == ActiveKeyboard)
+    {
+        ActiveKeyboard = -1;
+        IsShifted = false;
+        CurrentTrie = TRIE;
+    }
+
+    if (LiveKeyboards <= 0)
+    {
+        fprintf(stderr, "No keyboards left; exiting\n");
+        exit(EREAD);
+    }
+}
+
+void keydogger_daemon(void)
 {
     signal(SIGPIPE, SIG_IGN);
 
@@ -834,29 +899,43 @@ void keydogger_daemon()
         exit(ECLEAN);
     }
 
-    fkeyboard_device = open(KEYBOARD_DEVICE, O_RDWR | O_APPEND, NULL);
-    bool is_shifted = false;
-
-    if (fkeyboard_device < 0)
+    for (size_t i = 0; i < KeyboardCount; i++)
     {
-        fprintf(stderr, "Error opening %s\n", KEYBOARD_DEVICE);
+        int fd = open(EvdevKeyboards[i], O_RDWR);
+        if (fd < 0)
+        {
+            fprintf(stderr, "Warning: cannot open keyboard %s: %s\n",
+                    EvdevKeyboards[i], strerror(errno));
+            KeyboardPollfds[i].fd = -1;
+            continue;
+        }
+        KeyboardPollfds[i].fd = fd;
+        KeyboardPollfds[i].events = POLLIN;
+        KeyboardPollfds[i].revents = 0;
+        LiveKeyboards++;
+    }
+
+    if (LiveKeyboards == 0)
+    {
+        fprintf(stderr, "No keyboards could be opened\n");
         exit(EOPEN);
     }
-    vkeyboard_device = open(UINPUT_PATH, O_WRONLY);
-    if (vkeyboard_device < 0)
+
+    VKeyboardDevice = open(UINPUT_PATH, O_WRONLY);
+    if (VKeyboardDevice < 0)
     {
         fprintf(stderr, "Error opening %s\n", UINPUT_PATH);
         exit(EOPEN);
     }
 
-    init_virtual_device(vkeyboard_device);
+    init_virtual_device(VKeyboardDevice);
 
     init_key_to_position_map();
 
     pidfile_write();
 
     // Let the parent process know that startup succeeded
-    if (ready_fd >= 0)
+    if (ReadyFd >= 0)
     {
         char ready_message[64];
         int ready_length = snprintf(ready_message, sizeof(ready_message),
@@ -868,122 +947,199 @@ void keydogger_daemon()
             {
                 ready_size = sizeof(ready_message) - 1;
             }
-            write(ready_fd, ready_message, ready_size);
+            write(ReadyFd, ready_message, ready_size);
         }
-        close(ready_fd);
-        ready_fd = -1;
+        close(ReadyFd);
+        ReadyFd = -1;
     }
 
-    struct input_event event = {0};
-    struct trie *current_trie = TRIE;
+    IsShifted = false;
+    CurrentTrie = TRIE;
+    ActiveKeyboard = -1;
+
     while (1)
     {
-        int read_inputs = read(fkeyboard_device, &event, sizeof(struct input_event));
-        if (read_inputs < 0)
+        int ready = poll(KeyboardPollfds, KeyboardCount, -1);
+        if (ready < 0)
         {
-            fprintf(stderr, "Error reading from %s\n", KEYBOARD_DEVICE);
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            fprintf(stderr, "Error polling keyboards: %s\n", strerror(errno));
             exit(EREAD);
         }
-        // ignore events other than key
-        if (event.type != EV_KEY)
+
+        for (size_t i = 0; i < KeyboardCount; i++)
         {
-            continue;
-        }
-        // ignore if keydogger doesnt recognize the key
-        if (is_key_code_supported(event.code) == false)
-        {
-            continue;
-        }
-
-        // Handle shift down
-        if (event.value == 1 && (event.code == KEY_LEFTSHIFT || event.code == KEY_RIGHTSHIFT))
-        {
-            is_shifted = true;
-            continue;
-        }
-
-        // Handle shift up
-        if (event.value == 0 && (event.code == KEY_LEFTSHIFT || event.code == KEY_RIGHTSHIFT))
-        {
-            is_shifted = false;
-            continue;
-        }
-
-        // ignore shift keys
-        if (event.code == KEY_LEFTSHIFT || event.code == KEY_RIGHTSHIFT)
-        {
-            continue;
-        }
-
-        // ignore key up event
-        if (event.value == 0)
-        {
-            continue;
-        }
-
-        int event_code;
-        if (is_shifted)
-            event_code = event.code | FLAG_UPPERCASE;
-        else
-            event_code = event.code;
-        int position = key_codes_to_position[event_code];
-
-        // if next doesnt match trigger, reset
-        if (current_trie->next[position] == NULL)
-        {
-            current_trie = TRIE;
-            continue;
-        }
-
-        struct trie *next = current_trie->next[position];
-        // if next doesnt match trigger, reset
-        if ((event_code ^ char_codes_to_key_codes[position]) != 0)
-        {
-            current_trie = TRIE;
-            continue;
-        }
-        // if next is terminal, expand it
-        if (next->is_leaf)
-        {
-            struct trie *next_copy = next;
-            // RELEASE ALL TRIGGER KEYS
-            event.value = 0;
-            // release last key
-            send_key_to_device(fkeyboard_device, event);
-            send_sync(fkeyboard_device);
-
-            event.code = KEY_LEFTSHIFT;
-            send_key_to_device(fkeyboard_device, event);
-
-            send_sync(fkeyboard_device);
-            event.code = KEY_RIGHTSHIFT;
-
-            send_key_to_device(fkeyboard_device, event);
-            send_sync(fkeyboard_device);
-
-            while (next_copy->parent != NULL)
+            int fd = KeyboardPollfds[i].fd;
+            if (fd < 0)
             {
-                event.code = next_copy->parent->keycode;
-                send_key_to_device(fkeyboard_device, event);
-                send_sync(fkeyboard_device);
-                next_copy = next_copy->parent;
+                continue;
             }
 
-            // EXPAND
-            send_backspace(vkeyboard_device, next->size);
-            send_to_keyboard(next->expansion);
+            if (KeyboardPollfds[i].revents & (POLLHUP | POLLERR | POLLNVAL))
+            {
+                keyboard_disconnect(i);
+                continue;
+            }
+            if (!(KeyboardPollfds[i].revents & POLLIN))
+            {
+                continue;
+            }
 
-            // Reset trie head
-            current_trie = TRIE;
-        }
-        else
-        {
-            current_trie = next;
+            struct input_event event;
+            ssize_t read_inputs = read(fd, &event, sizeof(event));
+            if (read_inputs != (ssize_t)sizeof(event))
+            {
+                if (read_inputs < 0 && (errno == EINTR || errno == EAGAIN))
+                {
+                    continue;
+                }
+                keyboard_disconnect(i);
+                continue;
+            }
+
+            // ignore events other than key
+            if (event.type != EV_KEY)
+            {
+                continue;
+            }
+            // ignore if keydogger doesnt recognize the key
+            if (is_key_code_supported(event.code) == false)
+            {
+                continue;
+            }
+            // ignore autorepeat
+            if (event.value == 2)
+            {
+                continue;
+            }
+
+            if (event.value == 0)
+            {
+                if (fd != ActiveKeyboard)
+                {
+                    continue;
+                }
+                if (event.code == KEY_LEFTSHIFT || event.code == KEY_RIGHTSHIFT)
+                {
+                    IsShifted = false;
+                }
+                continue;
+            }
+
+            if (event.value != 1)
+            {
+                continue;
+            }
+
+            if (fd != ActiveKeyboard)
+            {
+                ActiveKeyboard = fd;
+                IsShifted = false;
+                CurrentTrie = TRIE;
+            }
+
+            // Handle shift down
+            if (event.code == KEY_LEFTSHIFT || event.code == KEY_RIGHTSHIFT)
+            {
+                IsShifted = true;
+                continue;
+            }
+
+            int event_code;
+            if (IsShifted)
+                event_code = event.code | FLAG_UPPERCASE;
+            else
+                event_code = event.code;
+            int position = KeyCodesToPosition[event_code];
+
+            // if next doesnt match trigger, reset
+            if (CurrentTrie->next[position] == NULL)
+            {
+                CurrentTrie = TRIE;
+                continue;
+            }
+
+            struct trie *next = CurrentTrie->next[position];
+            // if next doesnt match trigger, reset
+            if ((event_code ^ CharCodesToKeyCodes[position]) != 0)
+            {
+                CurrentTrie = TRIE;
+                continue;
+            }
+            // if next is terminal, expand it
+            if (next->is_leaf)
+            {
+                struct trie *next_copy = next;
+                int trigger_fd = ActiveKeyboard;
+                bool physical_ok = trigger_fd >= 0;
+
+                // RELEASE ALL TRIGGER KEYS
+                event.value = 0;
+                // release last key
+                if (physical_ok &&
+                    (!try_send_key_to_device(trigger_fd, event) ||
+                     !try_send_sync(trigger_fd)))
+                {
+                    physical_ok = false;
+                }
+
+                if (physical_ok)
+                {
+                    event.code = KEY_LEFTSHIFT;
+                    if (!try_send_key_to_device(trigger_fd, event) ||
+                        !try_send_sync(trigger_fd))
+                    {
+                        physical_ok = false;
+                    }
+                }
+
+                if (physical_ok)
+                {
+                    event.code = KEY_RIGHTSHIFT;
+                    if (!try_send_key_to_device(trigger_fd, event) ||
+                        !try_send_sync(trigger_fd))
+                    {
+                        physical_ok = false;
+                    }
+                }
+
+                while (physical_ok && next_copy->parent != NULL &&
+                       next_copy->parent != TRIE)
+                {
+                    event.code = next_copy->parent->keycode;
+                    if (!try_send_key_to_device(trigger_fd, event) ||
+                        !try_send_sync(trigger_fd))
+                    {
+                        physical_ok = false;
+                        break;
+                    }
+                    next_copy = next_copy->parent;
+                }
+
+                if (!physical_ok)
+                {
+                    keyboard_disconnect(i);
+                }
+
+                // EXPAND
+                send_backspace(VKeyboardDevice, next->size);
+                send_to_keyboard(next->expansion);
+
+                // Reset trie head
+                CurrentTrie = TRIE;
+            }
+            else
+            {
+                CurrentTrie = next;
+            }
         }
     }
 }
 
-void daemonize_keydogger()
+void daemonize_keydogger(void)
 {
     int ready_pipe[2];
     pid_t pid;
@@ -1069,7 +1225,7 @@ void daemonize_keydogger()
     }
 
     // Final daemon process
-    ready_fd = ready_pipe[1];
+    ReadyFd = ready_pipe[1];
 
     if (prctl(PR_SET_NAME, DAEMON) < 0)
     {
@@ -1081,7 +1237,7 @@ void daemonize_keydogger()
     long max_fd = sysconf(_SC_OPEN_MAX);
     for (long open_fd = max_fd - 1; open_fd > STDERR_FILENO; open_fd--)
     {
-        if (open_fd != ready_fd && open_fd != pidfile_fd)
+        if (open_fd != ReadyFd && open_fd != PidfileFd)
         {
             close((int)open_fd);
         }
@@ -1130,16 +1286,95 @@ void print_trie(struct trie *trie, size_t level)
     }
 }
 
-void read_keyboard_env()
+char *trim_whitespace(char *text)
 {
-#if DEBUG_MODE == 0
-    KEYBOARD_DEVICE = getenv("KEYDOGGER_KEYBOARD");
-    if (KEYBOARD_DEVICE == NULL)
+    while (*text != '\0' && isspace((unsigned char)*text))
+    {
+        text++;
+    }
+
+    char *end = text + strlen(text);
+    while (end > text && isspace((unsigned char)end[-1]))
+    {
+        end--;
+    }
+    *end = '\0';
+    return text;
+}
+
+void read_keyboard_env(void)
+{
+#if DEBUG_MODE == 1
+    const char *spec = KEYDOGGER_KEYBOARD;
+#else
+    const char *spec = getenv("KEYDOGGER_KEYBOARD");
+#endif
+
+    if (spec == NULL || spec[0] == '\0')
     {
         fprintf(stderr, "Required environment variable missing - KEYDOGGER_KEYBOARD\n");
         exit(EENV);
     }
-#endif
+
+    char *copy = strdup(spec);
+    if (copy == NULL)
+    {
+        fprintf(stderr, "Out of memory parsing KEYDOGGER_KEYBOARD\n");
+        exit(EENV);
+    }
+
+    KeyboardCount = 0;
+    char *save = NULL;
+    for (char *token = strtok_r(copy, ",", &save); token != NULL;
+         token = strtok_r(NULL, ",", &save))
+    {
+        char *path = trim_whitespace(token);
+        if (path[0] == '\0')
+        {
+            continue;
+        }
+
+        bool duplicate = false;
+        for (size_t i = 0; i < KeyboardCount; i++)
+        {
+            if (strcmp(EvdevKeyboards[i], path) == 0)
+            {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate)
+        {
+            continue;
+        }
+
+        if (KeyboardCount >= MAX_KEYBOARDS)
+        {
+            fprintf(stderr, "Too many keyboards in KEYDOGGER_KEYBOARD (max %d)\n", MAX_KEYBOARDS);
+            free(copy);
+            exit(EENV);
+        }
+
+        EvdevKeyboards[KeyboardCount] = strdup(path);
+        if (EvdevKeyboards[KeyboardCount] == NULL)
+        {
+            fprintf(stderr, "Out of memory parsing KEYDOGGER_KEYBOARD\n");
+            free(copy);
+            exit(EENV);
+        }
+        KeyboardPollfds[KeyboardCount].fd = -1;
+        KeyboardPollfds[KeyboardCount].events = 0;
+        KeyboardPollfds[KeyboardCount].revents = 0;
+        KeyboardCount++;
+    }
+
+    free(copy);
+
+    if (KeyboardCount == 0)
+    {
+        fprintf(stderr, "KEYDOGGER_KEYBOARD must contain at least one keyboard\n");
+        exit(EENV);
+    }
 }
 
 int main(int argc, char *argv[])
@@ -1226,7 +1461,7 @@ int main(int argc, char *argv[])
             exit(EXIT_SUCCESS);
         }
 
-        if (cancel_wait)
+        if (CancelWait)
         {
             printf("Stopped waiting; keydoggerd (pid %d) will exit in the background\n", pid);
             exit(EXIT_SUCCESS);

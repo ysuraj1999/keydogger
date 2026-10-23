@@ -8,7 +8,7 @@
 ## Prerequisites
 - `gcc`
 - `make`
-- `input` permission for your user
+- membership in the `input` group
 
 ```bash
 git clone https://github.com/jarusll/keydogger.git
@@ -17,8 +17,16 @@ cd keydogger
 
 ## Configuration
 
-Set the environment `KEYDOGGER_KEYBOARD` as the path to your keyboard device.
-It should be of the pattern `/dev/input/eventX`. X will be different for your system. You can use `evtest` to find out your keyboard device path.
+Set `KEYDOGGER_KEYBOARD` to one or more keyboard device paths, separated by commas:
+
+```bash
+export KEYDOGGER_KEYBOARD=/dev/input/event0,/dev/input/event15
+```
+
+Use `evtest` to identify your keyboard device paths.
+
+At least one listed keyboard must open successfully. Missing entries are
+reported as warnings and skipped.
 
 ## Installation
 
@@ -56,7 +64,7 @@ Here are some sample expansions you might like
 
 ### Commands
 ```bash
-export KEYDOGGER_KEYBOARD=/dev/input/event<N>
+export KEYDOGGER_KEYBOARD=/dev/input/event0,/dev/input/event15
 
 keydogger start
 keydogger status
