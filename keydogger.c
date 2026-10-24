@@ -7,7 +7,6 @@
 #include <ctype.h>
 #include <errno.h>
 #include <poll.h>
-#include <pwd.h>
 #include <sys/file.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
@@ -576,14 +575,6 @@ bool config_load(struct config *config, const char *path)
     else
     {
         const char *home = getenv("HOME");
-        if (home == NULL || home[0] == '\0')
-        {
-            struct passwd *passwd_entry = getpwuid(getuid());
-            if (passwd_entry != NULL)
-            {
-                home = passwd_entry->pw_dir;
-            }
-        }
         if (home == NULL || home[0] == '\0')
         {
             fprintf(stderr, "Error determining home directory\n");
