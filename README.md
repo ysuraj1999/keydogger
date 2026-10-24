@@ -37,10 +37,15 @@ make clean install-user
 This installs the binary to `~/.local/bin/keydogger`.
 
 ## Testing
-You can test out sample expansions from the local `keydoggerrc` file by
+You can inspect the sample expansions from the local `keydoggerrc` file with
 ```bash
 make clean build
-./keydogger debug
+./keydogger viz
+```
+
+To run them in the foreground, stop the service first, then:
+```bash
+HOME=$PWD ./keydogger foreground
 ```
 
 ## Usage
@@ -72,6 +77,9 @@ keydogger stop
 
 # Restart if you want to switch keyboards or reload expansions
 keydogger restart
+
+# Run in the foreground (for systemd or debugging)
+keydogger foreground
 ```
 
 ## TODO

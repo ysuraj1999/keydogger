@@ -220,7 +220,7 @@ void cli_start(struct keydogger *keydogger);
 void cli_status(struct keydogger *keydogger);
 void cli_stop(struct keydogger *keydogger);
 void cli_restart(struct keydogger *keydogger);
-void cli_debug(struct keydogger *keydogger);
+void cli_foreground(struct keydogger *keydogger);
 void cli_viz(struct keydogger *keydogger);
 void cli_stop_handle_sigint(int sig);
 

@@ -22,7 +22,7 @@
 #define CONFIG_WATCH_MASK (IN_CLOSE_WRITE | IN_MOVE_SELF | IN_DELETE_SELF)
 
 static const char *DaemonName = "keydoggerd";
-static const char *DebugRcPath = "./keydoggerrc";
+static const char *LocalRcPath = "./keydoggerrc";
 
 static struct keydogger Keydogger;
 static volatile sig_atomic_t StopCancel = 0;
@@ -1951,7 +1951,7 @@ void daemonize(struct keydogger *keydogger)
 
 void cli_usage(void)
 {
-    fprintf(stderr, "Usage error: keydogger start | stop | status | debug | viz\n");
+    fprintf(stderr, "Usage error: keydogger start | stop | status | restart | foreground | viz\n");
 }
 
 void cli_stop_handle_sigint(int sig)
@@ -2081,44 +2081,34 @@ void cli_restart(struct keydogger *keydogger)
     daemonize(keydogger);
 }
 
-void cli_debug(struct keydogger *keydogger)
+void cli_foreground(struct keydogger *keydogger)
 {
     pidfile_create(&keydogger->pidfile);
 
-    pid_t pid = pidfile_read(&keydogger->pidfile);
-    if (pid > 0)
+    pid_t running_pid = 0;
+    int pidfile_status = pidfile_acquire(&keydogger->pidfile, &running_pid);
+    if (pidfile_status == 1)
     {
-        if (kill(pid, SIGTERM) < 0 && errno != ESRCH)
+        if (running_pid > 0)
         {
-            perror("Error sending SIGTERM");
-            exit(EXIT_FAILURE);
+            printf("Already running at pid %d\n", running_pid);
         }
-        printf("Sent SIGTERM to keydoggerd (pid %d)\n", pid);
-        if (pidfile_acquire_wait(&keydogger->pidfile, SHUTDOWN_TIMEOUT_MS) < 0)
-        {
-            fprintf(stderr, "Timed out waiting for keydoggerd to stop\n");
-            exit(EXIT_FAILURE);
-        }
-    }
-    else
-    {
-        int pidfile_status = pidfile_acquire(&keydogger->pidfile, NULL);
-        if (pidfile_status == 1)
+        else
         {
             printf("Already running\n");
-            exit(EXIT_SUCCESS);
         }
-        if (pidfile_status < 0)
-        {
-            perror("Error opening pidfile");
-            exit(EOPEN);
-        }
+        exit(EXIT_SUCCESS);
+    }
+    if (pidfile_status < 0)
+    {
+        perror("Error opening pidfile");
+        exit(EOPEN);
     }
 
     prctl(PR_SET_NAME, DaemonName);
 
     keyboards_configure(&keydogger->keyboards);
-    if (!config_load(&keydogger->config, DebugRcPath))
+    if (!config_load(&keydogger->config, NULL))
     {
         exit(EOPEN);
     }
@@ -2130,7 +2120,7 @@ void cli_viz(struct keydogger *keydogger)
     (void)keydogger;
 
     struct config config = {0};
-    if (!config_load(&config, DebugRcPath))
+    if (!config_load(&config, LocalRcPath))
     {
         exit(EOPEN);
     }
@@ -2164,9 +2154,9 @@ int main(int argc, char *argv[])
     {
         cli_restart(&Keydogger);
     }
-    else if (strcmp(argv[1], "debug") == 0)
+    else if (strcmp(argv[1], "foreground") == 0)
     {
-        cli_debug(&Keydogger);
+        cli_foreground(&Keydogger);
     }
     else if (strcmp(argv[1], "viz") == 0)
     {

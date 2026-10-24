@@ -6,7 +6,7 @@ CALLGRIND_FILE=benchmark.out
 
 .PHONY: build
 build: keydogger.h keydogger.c
-	gcc -DDEBUG_MODE=0 -w keydogger.c -o keydogger
+	gcc -DDEBUG_MODE=0 -O2 -w keydogger.c -o keydogger
 
 .PHONY: dev
 dev: keydogger.h keydogger.c
@@ -30,7 +30,7 @@ debug: dev
 
 .PHONY: memcheck
 memcheck: dev
-	valgrind --tool=memcheck --leak-check=full --show-leak-kinds=all ./keydogger debug
+	valgrind --tool=memcheck --leak-check=full --show-leak-kinds=all ./keydogger foreground
 
 .PHONY: test
 test: keydogger.h keydogger.c tests/test_special_expansions.c
@@ -40,7 +40,7 @@ test: keydogger.h keydogger.c tests/test_special_expansions.c
 .PHONY: benchmark
 benchmark: dev
 	-rm callgrind*
-	valgrind --tool=callgrind --dump-instr=yes --simulate-cache=yes --collect-jumps=yes --callgrind-out-file=$(CALLGRIND_FILE) ./keydogger debug
+	valgrind --tool=callgrind --dump-instr=yes --simulate-cache=yes --collect-jumps=yes --callgrind-out-file=$(CALLGRIND_FILE) ./keydogger foreground
 
 .PHONY: viz
 viz:
