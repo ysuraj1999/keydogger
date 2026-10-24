@@ -684,7 +684,7 @@ bool config_watch_open(struct config_watch *watch, const char *path)
         return false;
     }
 
-    watch->inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    watch->inotify_fd = inotify_init1(IN_NONBLOCK);
     if (watch->inotify_fd < 0)
     {
         perror("inotify_init1");
