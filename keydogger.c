@@ -21,8 +21,11 @@
 
 #define STARTUP_TIMEOUT_MS 5000
 #define SHUTDOWN_TIMEOUT_MS 5000
+#define CONFIG_RELOAD_DEBOUNCE_MS 100
 
 #define MAX_KEYBOARDS 16
+
+#define CONFIG_WATCH_MASK (IN_CLOSE_WRITE | IN_MOVE_SELF | IN_DELETE_SELF)
 
 static char *EvdevKeyboards[MAX_KEYBOARDS];
 static struct pollfd KeyboardPollfds[MAX_KEYBOARDS];
@@ -32,6 +35,13 @@ static int ActiveKeyboard = -1;
 
 static bool IsShifted = false;
 static struct trie *CurrentTrie = NULL;
+
+static char *ConfigPath = NULL;
+static int InotifyFd = -1;
+static int WatchDescriptor = -1;
+static bool WatchLost = false;
+static bool ReloadPending = false;
+static int64_t ReloadDeadlineMs = 0;
 
 static char *DAEMON = "keydoggerd";
 static struct trie *TRIE = NULL;
@@ -515,6 +525,18 @@ void cleanup(void)
     CurrentTrie = NULL;
     IsShifted = false;
 
+    if (InotifyFd >= 0)
+    {
+        close(InotifyFd);
+        InotifyFd = -1;
+    }
+    WatchDescriptor = -1;
+    WatchLost = false;
+    ReloadPending = false;
+
+    free(ConfigPath);
+    ConfigPath = NULL;
+
     trie_cleanup(TRIE);
     TRIE = NULL;
 
@@ -551,53 +573,23 @@ bool is_printable_ascii(char *string)
     return true;
 }
 
-void rc_load(const char *path)
+struct trie *rc_parse(const char *path)
 {
-    char rc_file_path[256];
-    int path_length;
-
-    if (path != NULL)
-    {
-        path_length = snprintf(rc_file_path, sizeof(rc_file_path), "%s", path);
-        if (path_length < 0 || (size_t)path_length >= sizeof(rc_file_path))
-        {
-            fprintf(stderr, "Config path too long\n");
-            exit(ESTR);
-        }
-    }
-    else
-    {
-        const char *home = getenv("HOME");
-        if (home == NULL || home[0] == '\0')
-        {
-            struct passwd *passwd_entry = getpwuid(getuid());
-            if (passwd_entry != NULL)
-            {
-                home = passwd_entry->pw_dir;
-            }
-        }
-        if (home == NULL || home[0] == '\0')
-        {
-            fprintf(stderr, "Error determining home directory\n");
-            exit(EUSER);
-        }
-
-        path_length = snprintf(rc_file_path, sizeof(rc_file_path), "%s/%s", home, RC_PATH);
-        if (path_length < 0 || (size_t)path_length >= sizeof(rc_file_path))
-        {
-            fprintf(stderr, "Error constructing config path %s\n", RC_PATH);
-            exit(ESTR);
-        }
-    }
-
-    TRIE = malloc(sizeof(struct trie));
-    trie_init(TRIE, NULL);
-    FILE *rc_file = fopen(rc_file_path, "r");
+    FILE *rc_file = fopen(path, "r");
     if (rc_file == NULL)
     {
-        fprintf(stderr, "Error opening %s\n", rc_file_path);
-        exit(EOPEN);
+        fprintf(stderr, "Error opening %s\n", path);
+        return NULL;
     }
+
+    struct trie *root = malloc(sizeof(struct trie));
+    if (root == NULL)
+    {
+        fprintf(stderr, "Out of memory\n");
+        fclose(rc_file);
+        return NULL;
+    }
+    trie_init(root, NULL);
 
     char *line = NULL;
     size_t line_capacity = 0;
@@ -631,10 +623,214 @@ void rc_load(const char *path)
             fprintf(stderr, "Warning: skipping non-ASCII expansion for trigger %s\n", key);
             continue;
         }
-        trie_push(key, value);
+        trie_push(root, key, value);
     }
+
+    bool read_error = ferror(rc_file);
     free(line);
     fclose(rc_file);
+
+    if (read_error)
+    {
+        fprintf(stderr, "Error reading %s\n", path);
+        trie_cleanup(root);
+        return NULL;
+    }
+
+    return root;
+}
+
+void rc_load(const char *path)
+{
+    char rc_file_path[PATH_MAX];
+
+    if (path != NULL)
+    {
+        int path_length = snprintf(rc_file_path, sizeof(rc_file_path), "%s", path);
+        if (path_length < 0 || (size_t)path_length >= sizeof(rc_file_path))
+        {
+            fprintf(stderr, "Config path too long\n");
+            exit(ESTR);
+        }
+    }
+    else
+    {
+        const char *home = getenv("HOME");
+        if (home == NULL || home[0] == '\0')
+        {
+            struct passwd *passwd_entry = getpwuid(getuid());
+            if (passwd_entry != NULL)
+            {
+                home = passwd_entry->pw_dir;
+            }
+        }
+        if (home == NULL || home[0] == '\0')
+        {
+            fprintf(stderr, "Error determining home directory\n");
+            exit(EUSER);
+        }
+
+        int path_length = snprintf(rc_file_path, sizeof(rc_file_path), "%s/%s", home, RC_PATH);
+        if (path_length < 0 || (size_t)path_length >= sizeof(rc_file_path))
+        {
+            fprintf(stderr, "Error constructing config path %s\n", RC_PATH);
+            exit(ESTR);
+        }
+    }
+
+    char absolute_path[PATH_MAX];
+    if (rc_file_path[0] != '/')
+    {
+        char cwd[PATH_MAX];
+        if (getcwd(cwd, sizeof(cwd)) == NULL)
+        {
+            perror("getcwd");
+            exit(ESTR);
+        }
+        int path_length = snprintf(absolute_path, sizeof(absolute_path), "%s/%s", cwd, rc_file_path);
+        if (path_length < 0 || (size_t)path_length >= sizeof(absolute_path))
+        {
+            fprintf(stderr, "Config path too long\n");
+            exit(ESTR);
+        }
+    }
+    else
+    {
+        int path_length = snprintf(absolute_path, sizeof(absolute_path), "%s", rc_file_path);
+        if (path_length < 0 || (size_t)path_length >= sizeof(absolute_path))
+        {
+            fprintf(stderr, "Config path too long\n");
+            exit(ESTR);
+        }
+    }
+
+    free(ConfigPath);
+    ConfigPath = strdup(absolute_path);
+    if (ConfigPath == NULL)
+    {
+        fprintf(stderr, "Out of memory\n");
+        exit(ESTR);
+    }
+
+    TRIE = rc_parse(ConfigPath);
+    if (TRIE == NULL)
+    {
+        exit(EOPEN);
+    }
+}
+
+bool rc_reload(void)
+{
+    if (ConfigPath == NULL)
+    {
+        return false;
+    }
+
+    struct trie *new_trie = rc_parse(ConfigPath);
+    if (new_trie == NULL)
+    {
+        exit(EREAD);
+    }
+
+    struct trie *old_trie = TRIE;
+    TRIE = new_trie;
+    CurrentTrie = new_trie;
+    trie_cleanup(old_trie);
+    fprintf(stderr, "Reloaded %s\n", ConfigPath);
+    return true;
+}
+
+int64_t now_ms(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0)
+    {
+        perror("clock_gettime");
+        exit(EREAD);
+    }
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+bool config_watch_init(void)
+{
+    if (ConfigPath == NULL)
+    {
+        return false;
+    }
+
+    InotifyFd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    if (InotifyFd < 0)
+    {
+        perror("inotify_init1");
+        return false;
+    }
+
+    WatchDescriptor = inotify_add_watch(InotifyFd, ConfigPath, CONFIG_WATCH_MASK);
+    if (WatchDescriptor < 0)
+    {
+        perror("inotify_add_watch");
+        close(InotifyFd);
+        InotifyFd = -1;
+        return false;
+    }
+
+    WatchLost = false;
+    return true;
+}
+
+void config_watch_drain(void)
+{
+    if (InotifyFd < 0)
+    {
+        return;
+    }
+
+    char buffer[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
+    ssize_t length;
+    while ((length = read(InotifyFd, buffer, sizeof(buffer))) > 0)
+    {
+        for (char *ptr = buffer; ptr < buffer + length;)
+        {
+            const struct inotify_event *event = (const struct inotify_event *)ptr;
+            bool schedule_reload = true;
+
+            if (event->mask & (IN_MOVE_SELF | IN_DELETE_SELF))
+            {
+                if (WatchDescriptor >= 0)
+                {
+                    inotify_rm_watch(InotifyFd, WatchDescriptor);
+                    WatchDescriptor = -1;
+                }
+                WatchLost = true;
+            }
+            else if (event->mask & IN_IGNORED)
+            {
+                if (event->wd == WatchDescriptor)
+                {
+                    WatchDescriptor = -1;
+                    WatchLost = true;
+                }
+                else
+                {
+                    schedule_reload = false;
+                }
+            }
+
+            if (schedule_reload)
+            {
+                ReloadDeadlineMs = now_ms() + CONFIG_RELOAD_DEBOUNCE_MS;
+                ReloadPending = true;
+            }
+
+            ptr += sizeof(struct inotify_event) + event->len;
+        }
+    }
+
+    if (length < 0 && errno != EAGAIN && errno != EINTR)
+    {
+        fprintf(stderr, "Error reading inotify: %s\n", strerror(errno));
+        exit(EREAD);
+    }
 }
 
 bool is_key_code_supported(size_t code)
@@ -770,26 +966,38 @@ void trie_init(struct trie *trie, struct key *key)
     }
 }
 
-void trie_push(char *key, char *expansion)
+void trie_push(struct trie *root, char *key, char *expansion)
 {
-    struct trie *current_trie = TRIE;
+    struct trie *node = root;
     for (size_t i = 0; i < strlen(key); i++)
     {
         char character = key[i];
-        struct key key = get_key_from_char(character);
-        int position = key.position;
-        if (current_trie->next[position] == NULL)
+        struct key key_data = get_key_from_char(character);
+        int position = key_data.position;
+        if (node->next[position] == NULL)
         {
-            current_trie->next[position] = malloc(sizeof(struct trie));
-            trie_init(current_trie->next[position], &key);
-            current_trie->next[position]->size = current_trie->size + 1;
-            current_trie->next[position]->parent = current_trie;
+            struct trie *child = malloc(sizeof(struct trie));
+            if (child == NULL)
+            {
+                fprintf(stderr, "Out of memory\n");
+                exit(ESTR);
+            }
+            trie_init(child, &key_data);
+            child->size = node->size + 1;
+            child->parent = node;
+            node->next[position] = child;
         }
-        current_trie = current_trie->next[position];
+        node = node->next[position];
     }
-    current_trie->is_leaf = true;
-    current_trie->expansion = malloc(strlen(expansion) + 1);
-    strcpy(current_trie->expansion, expansion);
+    node->is_leaf = true;
+    free(node->expansion);
+    node->expansion = malloc(strlen(expansion) + 1);
+    if (node->expansion == NULL)
+    {
+        fprintf(stderr, "Out of memory\n");
+        exit(ESTR);
+    }
+    strcpy(node->expansion, expansion);
 }
 
 void init_virtual_device(int vkeyboard_device)
@@ -932,6 +1140,11 @@ void keydogger_daemon(void)
 
     init_key_to_position_map();
 
+    if (!config_watch_init())
+    {
+        fprintf(stderr, "Warning: auto-reload disabled\n");
+    }
+
     pidfile_write();
 
     // Let the parent process know that startup succeeded
@@ -959,7 +1172,29 @@ void keydogger_daemon(void)
 
     while (1)
     {
-        int ready = poll(KeyboardPollfds, KeyboardCount, -1);
+        struct pollfd PollFds[MAX_KEYBOARDS + 1];
+        size_t PollCount = KeyboardCount;
+        for (size_t i = 0; i < KeyboardCount; i++)
+        {
+            PollFds[i] = KeyboardPollfds[i];
+        }
+        if (InotifyFd >= 0)
+        {
+            PollFds[PollCount].fd = InotifyFd;
+            PollFds[PollCount].events = POLLIN;
+            PollFds[PollCount].revents = 0;
+            PollCount++;
+        }
+
+        int timeout = -1;
+        if (ReloadPending)
+        {
+            int64_t now = now_ms();
+            int64_t remaining = ReloadDeadlineMs - now;
+            timeout = remaining > 0 ? (int)remaining : 0;
+        }
+
+        int ready = poll(PollFds, PollCount, timeout);
         if (ready < 0)
         {
             if (errno == EINTR)
@@ -978,12 +1213,12 @@ void keydogger_daemon(void)
                 continue;
             }
 
-            if (KeyboardPollfds[i].revents & (POLLHUP | POLLERR | POLLNVAL))
+            if (PollFds[i].revents & (POLLHUP | POLLERR | POLLNVAL))
             {
                 keyboard_disconnect(i);
                 continue;
             }
-            if (!(KeyboardPollfds[i].revents & POLLIN))
+            if (!(PollFds[i].revents & POLLIN))
             {
                 continue;
             }
@@ -1135,6 +1370,29 @@ void keydogger_daemon(void)
             {
                 CurrentTrie = next;
             }
+        }
+
+        if (InotifyFd >= 0 && (PollFds[KeyboardCount].revents & POLLIN))
+        {
+            config_watch_drain();
+        }
+
+        if (ReloadPending && now_ms() >= ReloadDeadlineMs)
+        {
+            ReloadPending = false;
+
+            if (WatchLost)
+            {
+                WatchDescriptor = inotify_add_watch(InotifyFd, ConfigPath, CONFIG_WATCH_MASK);
+                if (WatchDescriptor < 0)
+                {
+                    perror(ConfigPath);
+                    exit(EREAD);
+                }
+                WatchLost = false;
+            }
+
+            rc_reload();
         }
     }
 }

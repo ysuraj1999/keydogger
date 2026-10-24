@@ -2,7 +2,10 @@
 #include <linux/input.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <sys/types.h>
+#include <sys/inotify.h>
+#include <time.h>
 
 #ifndef KEYDOGGER_H
 #define KEYDOGGER_H
@@ -129,7 +132,12 @@ char *trim_whitespace(char *text);
 
 void trie_cleanup(struct trie *trie);
 void cleanup(void);
+struct trie *rc_parse(const char *path);
 void rc_load(const char *path);
+bool rc_reload(void);
+bool config_watch_init(void);
+void config_watch_drain(void);
+int64_t now_ms(void);
 bool is_key_code_supported(size_t code);
 void send_key_to_device(int keyboard_device, struct input_event event);
 void send_backspace(int device_fd, size_t n);
@@ -139,7 +147,7 @@ void send_shift_up(int device_fd);
 void send_to_keyboard(char *string);
 void trie_init(struct trie *trie, struct key *key);
 struct key get_key_from_char(char character);
-void trie_push(char *key, char *expansion);
+void trie_push(struct trie *root, char *key, char *expansion);
 void init_virtual_device(int vkeyboard_device);
 void signal_cleanup_handler(int sig);
 void keydogger_daemon(void);
