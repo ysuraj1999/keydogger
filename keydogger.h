@@ -133,7 +133,6 @@ struct trie *config_parse(const char *path);
 bool config_load(struct config *config, const char *path);
 bool config_reload(struct config *config);
 void config_unload(struct config *config);
-void config_destroy(struct config *config);
 bool config_is_loaded(const struct config *config);
 
 /* --- config watch --- */

@@ -668,11 +668,6 @@ void config_unload(struct config *config)
     config->path = NULL;
 }
 
-void config_destroy(struct config *config)
-{
-    config_unload(config);
-}
-
 bool config_is_loaded(const struct config *config)
 {
     return config->trie != NULL;
@@ -1666,7 +1661,7 @@ void daemon_cleanup(struct keydogger *keydogger)
 
     config_watch_close(&keydogger->watch);
     trigger_reset(&keydogger->trigger);
-    config_destroy(&keydogger->config);
+    config_unload(&keydogger->config);
 
     pidfile_destroy(&keydogger->pidfile);
 }
@@ -2119,7 +2114,7 @@ void cli_viz(struct keydogger *keydogger)
         exit(EOPEN);
     }
     trie_print(config.trie, 0);
-    config_destroy(&config);
+    config_unload(&config);
 }
 
 int main(int argc, char *argv[])
