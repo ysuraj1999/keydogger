@@ -32,6 +32,11 @@ debug: dev
 memcheck: dev
 	valgrind --tool=memcheck --leak-check=full --show-leak-kinds=all ./keydogger debug
 
+.PHONY: test
+test: keydogger.h keydogger.c tests/test_special_expansions.c
+	gcc -DDEBUG_MODE=0 -D_GNU_SOURCE -g -O0 -Wall -Wextra tests/test_special_expansions.c -o tests/test_special_expansions
+	./tests/test_special_expansions
+
 .PHONY: benchmark
 benchmark: dev
 	-rm callgrind*
@@ -45,6 +50,7 @@ viz:
 clean:
 	-rm *.o > /dev/null 2>&1 || true
 	-rm keydogger -f > /dev/null 2>&1 || true
+	-rm tests/test_special_expansions -f > /dev/null 2>&1 || true
 	-rm callgrind* > /dev/null 2>&1 || true
 	-rm vgcore* > /dev/null 2>&1 || true
 	-rm *.out > /dev/null 2>&1 || true

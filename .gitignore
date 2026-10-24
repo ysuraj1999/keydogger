@@ -2,6 +2,7 @@ expanse
 keydogger
 keydoggerd
 keydogger.o
+tests/test_special_expansions
 *.o
 settings.json
 vgcore*

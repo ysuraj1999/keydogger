@@ -44,6 +44,12 @@
 #define RC_PATH "keydoggerrc"
 #define UINPUT_PATH "/dev/uinput"
 
+/* Reserved expansion values interpreted as actions instead of text. */
+#define KEYDOGGER_TOGGLE_EXPANSION "KEYDOGGER_TOGGLE"
+#define KEYDOGGER_STATUS_EXPANSION "KEYDOGGER_STATUS"
+#define KEYDOGGER_STATUS_ON "Keydogger - On"
+#define KEYDOGGER_STATUS_OFF "Keydogger - Off"
+
 struct key
 {
     int position;
@@ -110,6 +116,7 @@ struct keydogger
     struct keyboard_set keyboards;
     struct trigger trigger;
     struct vkeyboard vkeyboard;
+    bool enabled;
 };
 
 /* --- keymap --- */

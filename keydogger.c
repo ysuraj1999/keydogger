@@ -1533,6 +1533,7 @@ void keydogger_create(struct keydogger *keydogger)
 
     keydogger->vkeyboard.fd = -1;
     keydogger->vkeyboard.created = false;
+    keydogger->enabled = true;
 }
 
 void daemon_install_signal_handlers(void)
@@ -1588,6 +1589,21 @@ void daemon_disconnect_keyboard(struct keydogger *keydogger, size_t index)
 void daemon_expand(struct keydogger *keydogger, size_t keyboard_index,
                    struct trie *leaf, struct input_event event)
 {
+    bool is_toggle = strcmp(leaf->expansion, KEYDOGGER_TOGGLE_EXPANSION) == 0;
+    bool is_status = strcmp(leaf->expansion, KEYDOGGER_STATUS_EXPANSION) == 0;
+
+    // While disabled, only the action triggers are handled.
+    if (!keydogger->enabled && !is_toggle && !is_status)
+    {
+        return;
+    }
+
+    // Update the authoritative state before doing anything else.
+    if (is_toggle)
+    {
+        keydogger->enabled = !keydogger->enabled;
+    }
+
     int trigger_fd = keydogger->keyboards.items[keyboard_index].fd;
     struct trie *next_copy = leaf;
     bool physical_ok = trigger_fd >= 0;
@@ -1639,6 +1655,20 @@ void daemon_expand(struct keydogger *keydogger, size_t keyboard_index,
     }
 
     vkeyboard_emit_backspace(&keydogger->vkeyboard, leaf->size);
+
+    if (is_toggle)
+    {
+        return;
+    }
+
+    if (is_status)
+    {
+        vkeyboard_emit_text(&keydogger->vkeyboard,
+                            keydogger->enabled ? KEYDOGGER_STATUS_ON
+                                               : KEYDOGGER_STATUS_OFF);
+        return;
+    }
+
     vkeyboard_emit_text(&keydogger->vkeyboard, leaf->expansion);
 }
 
