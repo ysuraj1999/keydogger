@@ -13,6 +13,7 @@
 #define KEYDOGGER_H
 
 #define SLEEP_TIME 1000
+#define KEYBOARD_CHECK_INTERVAL_MS 1000
 #define LINUX_KEYS 50
 #define MAX_KEYBOARDS 16
 
@@ -85,13 +86,20 @@ struct keyboard
 {
     int fd;
     char *path;
+
+    /* The exact device node this path pointed at when we opened it.
+       A new connection creates a new node, so this changes even when
+       the event number is reused. */
+    dev_t device;
+    ino_t instance;
+
+    bool waiting_for_key;
 };
 
 struct keyboard_set
 {
     struct keyboard items[MAX_KEYBOARDS];
     size_t count;
-    size_t live;
     bool configured;
 };
 
@@ -166,13 +174,14 @@ bool process_wait_exit(pid_t pid, int timeout_ms, const volatile sig_atomic_t *c
 /* --- keyboards --- */
 void keyboards_configure(struct keyboard_set *keyboards);
 bool keyboards_open(struct keyboard_set *keyboards);
+bool keyboards_reconnect(struct keyboard_set *keyboards);
 void keyboards_close(struct keyboard_set *keyboards);
 void keyboards_destroy(struct keyboard_set *keyboards);
 void keyboards_disconnect(struct keyboard_set *keyboards, size_t index);
 bool keyboards_are_configured(const struct keyboard_set *keyboards);
-bool keyboards_are_open(const struct keyboard_set *keyboards);
 bool keyboard_open(struct keyboard *keyboard);
 void keyboard_close(struct keyboard *keyboard);
+void keyboard_heard_from(struct keyboard *keyboard);
 bool keyboard_read_event(struct keyboard *keyboard, struct input_event *event);
 
 /* --- trigger --- */
@@ -209,6 +218,7 @@ void daemonize(struct keydogger *keydogger);
 void daemon_run(struct keydogger *keydogger, int ready_fd);
 void daemon_cleanup(struct keydogger *keydogger);
 void daemon_reload_config(struct keydogger *keydogger);
+void daemon_reconnect_keyboards(struct keydogger *keydogger);
 void daemon_disconnect_keyboard(struct keydogger *keydogger, size_t index);
 void daemon_expand(struct keydogger *keydogger, size_t keyboard_index,
                    struct trie *leaf, struct input_event event);

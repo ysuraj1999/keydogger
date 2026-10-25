@@ -1020,9 +1020,11 @@ void keyboards_configure(struct keyboard_set *keyboards)
         free(keyboards->items[i].path);
         keyboards->items[i].fd = -1;
         keyboards->items[i].path = NULL;
+        keyboards->items[i].device = 0;
+        keyboards->items[i].instance = 0;
+        keyboards->items[i].waiting_for_key = false;
     }
     keyboards->count = 0;
-    keyboards->live = 0;
     keyboards->configured = false;
 
 #if DEBUG_MODE == 1
@@ -1083,6 +1085,9 @@ void keyboards_configure(struct keyboard_set *keyboards)
             exit(EENV);
         }
         keyboards->items[keyboards->count].fd = -1;
+        keyboards->items[keyboards->count].device = 0;
+        keyboards->items[keyboards->count].instance = 0;
+        keyboards->items[keyboards->count].waiting_for_key = false;
         keyboards->count++;
     }
 
@@ -1099,8 +1104,21 @@ void keyboards_configure(struct keyboard_set *keyboards)
 
 bool keyboard_open(struct keyboard *keyboard)
 {
+    struct stat status;
     keyboard->fd = open(keyboard->path, O_RDWR);
-    return keyboard->fd >= 0;
+    if (keyboard->fd < 0)
+    {
+        return false;
+    }
+    if (fstat(keyboard->fd, &status) < 0)
+    {
+        close(keyboard->fd);
+        keyboard->fd = -1;
+        return false;
+    }
+    keyboard->device = status.st_rdev;
+    keyboard->instance = status.st_ino;
+    return true;
 }
 
 void keyboard_close(struct keyboard *keyboard)
@@ -1112,6 +1130,19 @@ void keyboard_close(struct keyboard *keyboard)
     }
 }
 
+static bool keyboard_needs_reopen(const struct keyboard *keyboard)
+{
+    struct stat status;
+
+    if (stat(keyboard->path, &status) < 0)
+    {
+        return keyboard->fd < 0;
+    }
+
+    return status.st_rdev != keyboard->device ||
+           status.st_ino != keyboard->instance;
+}
+
 bool keyboards_open(struct keyboard_set *keyboards)
 {
     if (!keyboards->configured)
@@ -1119,12 +1150,12 @@ bool keyboards_open(struct keyboard_set *keyboards)
         return false;
     }
 
-    keyboards->live = 0;
+    bool opened = false;
     for (size_t i = 0; i < keyboards->count; i++)
     {
         if (keyboard_open(&keyboards->items[i]))
         {
-            keyboards->live++;
+            opened = true;
         }
         else
         {
@@ -1133,7 +1164,36 @@ bool keyboards_open(struct keyboard_set *keyboards)
         }
     }
 
-    return keyboards->live > 0;
+    return opened;
+}
+
+bool keyboards_reconnect(struct keyboard_set *keyboards)
+{
+    if (!keyboards->configured)
+    {
+        return false;
+    }
+
+    bool reconnected = false;
+    for (size_t i = 0; i < keyboards->count; i++)
+    {
+        struct keyboard *keyboard = &keyboards->items[i];
+        if (!keyboard_needs_reopen(keyboard))
+        {
+            continue;
+        }
+
+        keyboard_close(keyboard);
+        if (!keyboard_open(keyboard))
+        {
+            continue;
+        }
+
+        keyboard->waiting_for_key = true;
+        reconnected = true;
+    }
+
+    return reconnected;
 }
 
 void keyboards_close(struct keyboard_set *keyboards)
@@ -1142,7 +1202,6 @@ void keyboards_close(struct keyboard_set *keyboards)
     {
         keyboard_close(&keyboards->items[i]);
     }
-    keyboards->live = 0;
 }
 
 void keyboards_destroy(struct keyboard_set *keyboards)
@@ -1153,6 +1212,9 @@ void keyboards_destroy(struct keyboard_set *keyboards)
         free(keyboards->items[i].path);
         keyboards->items[i].path = NULL;
         keyboards->items[i].fd = -1;
+        keyboards->items[i].device = 0;
+        keyboards->items[i].instance = 0;
+        keyboards->items[i].waiting_for_key = false;
     }
     keyboards->count = 0;
     keyboards->configured = false;
@@ -1168,15 +1230,10 @@ void keyboards_disconnect(struct keyboard_set *keyboards, size_t index)
 
     close(fd);
     keyboards->items[index].fd = -1;
-    keyboards->live--;
+    keyboards->items[index].waiting_for_key = false;
 
-    fprintf(stderr, "Warning: keyboard %s disconnected\n", keyboards->items[index].path);
-
-    if (keyboards->live <= 0)
-    {
-        fprintf(stderr, "No keyboards left; exiting\n");
-        exit(EREAD);
-    }
+    fprintf(stderr, "Warning: keyboard %s disconnected; retrying\n",
+            keyboards->items[index].path);
 }
 
 bool keyboards_are_configured(const struct keyboard_set *keyboards)
@@ -1184,9 +1241,15 @@ bool keyboards_are_configured(const struct keyboard_set *keyboards)
     return keyboards->configured;
 }
 
-bool keyboards_are_open(const struct keyboard_set *keyboards)
+void keyboard_heard_from(struct keyboard *keyboard)
 {
-    return keyboards->live > 0;
+    if (!keyboard->waiting_for_key)
+    {
+        return;
+    }
+
+    keyboard->waiting_for_key = false;
+    fprintf(stderr, "Keyboard %s reconnected\n", keyboard->path);
 }
 
 bool keyboard_read_event(struct keyboard *keyboard, struct input_event *event)
@@ -1527,6 +1590,9 @@ void keydogger_create(struct keydogger *keydogger)
     {
         keydogger->keyboards.items[i].fd = -1;
         keydogger->keyboards.items[i].path = NULL;
+        keydogger->keyboards.items[i].device = 0;
+        keydogger->keyboards.items[i].instance = 0;
+        keydogger->keyboards.items[i].waiting_for_key = false;
     }
 
     trigger_create(&keydogger->trigger);
@@ -1574,6 +1640,14 @@ void daemon_reload_config(struct keydogger *keydogger)
         exit(EREAD);
     }
     fprintf(stderr, "Reloaded %s\n", keydogger->config.path);
+}
+
+void daemon_reconnect_keyboards(struct keydogger *keydogger)
+{
+    if (keyboards_reconnect(&keydogger->keyboards))
+    {
+        trigger_reset(&keydogger->trigger);
+    }
 }
 
 void daemon_disconnect_keyboard(struct keydogger *keydogger, size_t index)
@@ -1733,6 +1807,8 @@ void daemon_run(struct keydogger *keydogger, int ready_fd)
 
     while (1)
     {
+        daemon_reconnect_keyboards(keydogger);
+
         struct pollfd PollFds[MAX_KEYBOARDS + 1];
         size_t PollCount = keydogger->keyboards.count;
 
@@ -1751,11 +1827,15 @@ void daemon_run(struct keydogger *keydogger, int ready_fd)
             PollCount++;
         }
 
-        int timeout = -1;
+        int timeout = KEYBOARD_CHECK_INTERVAL_MS;
         if (keydogger->watch.reload_pending)
         {
             int64_t remaining = keydogger->watch.reload_deadline_ms - monotonic_now_ms();
-            timeout = remaining > 0 ? (int)remaining : 0;
+            int reload_timeout = remaining > 0 ? (int)remaining : 0;
+            if (reload_timeout < timeout)
+            {
+                timeout = reload_timeout;
+            }
         }
 
         int ready = poll(PollFds, PollCount, timeout);
@@ -1798,6 +1878,8 @@ void daemon_run(struct keydogger *keydogger, int ready_fd)
                 daemon_disconnect_keyboard(keydogger, i);
                 continue;
             }
+
+            keyboard_heard_from(&keydogger->keyboards.items[i]);
 
             struct trie *leaf = trigger_feed(&keydogger->trigger,
                                             keydogger->config.trie, fd, event);
